@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Skunkworks — TARC Org Chart</title>
+<link rel="stylesheet" href="style.css" />
+<script src="https://cdn.jsdelivr.net/npm/d3@7"></script>
+<script src="https://cdn.jsdelivr.net/npm/d3-flextree@2"></script>
+<script src="https://cdn.jsdelivr.net/npm/d3-org-chart@3"></script>
+</head>
+<body>
+  <header>
+    <h1>TARC, Inc. — Account Org Chart</h1>
+    <div class="controls">
+      <input id="search" type="text" list="employee-list" placeholder="Find a person by name..." autocomplete="off" />
+      <datalist id="employee-list"></datalist>
+      <button id="clearBtn">Show full org</button>
+
+      <label class="sort-label">Sort/group by:
+        <select id="sortBy">
+          <option value="none">None (reporting lines only)</option>
+          <option value="seller">Apex Seller</option>
+          <option value="location">Geography</option>
+        </select>
+      </label>
+
+      <button id="expandAllBtn">Expand all</button>
+      <button id="collapseBtn">Collapse to directors</button>
+    </div>
+    <div id="legend"></div>
+  </header>
+
+  <main id="chart"></main>
+
+  <div id="detailPanel" class="hidden">
+    <button id="closeDetail">&times;</button>
+    <div id="detailContent"></div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

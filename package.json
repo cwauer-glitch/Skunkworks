@@ -1,0 +1,16 @@
+{
+  "name": "skunkworks",
+  "version": "1.0.0",
+  "description": "Living org chart for TARC, Inc. account relationships",
+  "main": "server/server.js",
+  "scripts": {
+    "start": "node server/server.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "better-sqlite3": "^12.11.1",
+    "express": "^5.2.1"
+  }
+}
