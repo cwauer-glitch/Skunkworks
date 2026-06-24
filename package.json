@@ -1,7 +1,7 @@
 {
   "name": "skunkworks",
   "version": "1.0.0",
-  "description": "Living org chart for TARC, Inc. account relationships",
+  "description": "Living, editable org chart for client account relationships across multiple organizations",
   "main": "server/server.js",
   "scripts": {
     "start": "node server/server.js"

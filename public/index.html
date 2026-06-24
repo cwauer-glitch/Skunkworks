@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>Skunkworks — TARC Org Chart</title>
+<title>Skunkworks — Account Org Chart</title>
 <link rel="stylesheet" href="style.css" />
 <script src="https://cdn.jsdelivr.net/npm/d3@7"></script>
 <script src="https://cdn.jsdelivr.net/npm/d3-flextree@2"></script>
@@ -11,8 +11,11 @@
 </head>
 <body>
   <header>
-    <h1>TARC, Inc. — Account Org Chart</h1>
+    <h1>Skunkworks — Account Org Chart</h1>
     <div class="controls">
+      <select id="orgSwitcher"></select>
+      <button id="newOrgBtn">+ New Org</button>
+
       <input id="search" type="text" list="employee-list" placeholder="Find a person by name..." autocomplete="off" />
       <datalist id="employee-list"></datalist>
       <button id="clearBtn">Show full org</button>
@@ -27,6 +30,11 @@
 
       <button id="expandAllBtn">Expand all</button>
       <button id="collapseBtn">Collapse to directors</button>
+
+      <label class="sort-label"><input type="checkbox" id="priorityFilter" /> Show only flagged priority</label>
+
+      <button id="addPersonBtn">+ Add Person</button>
+      <button id="resetOrgBtn" class="danger">Reset Org Data</button>
     </div>
     <div id="legend"></div>
   </header>
@@ -36,6 +44,67 @@
   <div id="detailPanel" class="hidden">
     <button id="closeDetail">&times;</button>
     <div id="detailContent"></div>
+  </div>
+
+  <div id="passcodeModal" class="modal-overlay hidden">
+    <div class="modal">
+      <h3>Edit passcode required</h3>
+      <p id="passcodeError" class="modal-error"></p>
+      <input id="passcodeInput" type="password" placeholder="Enter edit passcode" />
+      <div class="modal-actions">
+        <button id="passcodeCancel">Cancel</button>
+        <button id="passcodeSubmit">Continue</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="addPersonModal" class="modal-overlay hidden">
+    <div class="modal">
+      <h3>Add Person</h3>
+      <p id="addPersonError" class="modal-error"></p>
+      <label>Name <input id="apName" type="text" /></label>
+      <label>Title <input id="apTitle" type="text" /></label>
+      <label>Level
+        <select id="apLevel">
+          <option value="CTO">CTO</option>
+          <option value="SVP">SVP</option>
+          <option value="VP">VP</option>
+          <option value="Director">Director</option>
+          <option value="Manager">Manager</option>
+          <option value="Staff" selected>Staff</option>
+        </select>
+      </label>
+      <label>Division <input id="apDivision" type="text" /></label>
+      <label>Location <input id="apLocation" type="text" /></label>
+      <label>Apex Seller <input id="apSeller" type="text" /></label>
+      <label>Seller Territory <input id="apSellerTerritory" type="text" /></label>
+      <label>Reports To <select id="apManager"></select></label>
+      <label>Priority Tags <input id="apPriorityTags" type="text" /></label>
+      <label>Priority Goal <textarea id="apPriorityGoal"></textarea></label>
+      <label>Priority Signal
+        <select id="apPrioritySignal">
+          <option value="none" selected>None</option>
+          <option value="watch">Watch</option>
+          <option value="high">High</option>
+        </select>
+      </label>
+      <div class="modal-actions">
+        <button id="addPersonCancel">Cancel</button>
+        <button id="addPersonSubmit">Add</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="newOrgModal" class="modal-overlay hidden">
+    <div class="modal">
+      <h3>New Organization</h3>
+      <p id="newOrgError" class="modal-error"></p>
+      <input id="newOrgName" type="text" placeholder="Organization name" />
+      <div class="modal-actions">
+        <button id="newOrgCancel">Cancel</button>
+        <button id="newOrgSubmit">Create</button>
+      </div>
+    </div>
   </div>
 
   <script src="app.js"></script>
