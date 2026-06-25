@@ -207,6 +207,13 @@ body {
   opacity: 0.55;
 }
 
+.vp-backdrop-label {
+  position: absolute;
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
 #detailPanel {
   position: fixed;
   top: 0;

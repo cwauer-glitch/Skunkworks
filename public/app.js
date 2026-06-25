@@ -202,9 +202,9 @@ function nodeContent(d) {
   if (data.status === 'vacant') {
     return `
       <div class="org-card" data-node-id="${data.id}" style="width:100%; height:100%; border:3px solid #d33; border-radius:8px; background:#fdeaea; padding:10px 12px; font-family:inherit;">
-        <div class="card-name" style="font-size:16px; color:#a00;">VACANT</div>
-        <div class="card-title" style="font-size:11px;">previously: ${data.departed_name || 'Unknown'}</div>
-        <div class="card-location" style="font-size:10px;">${data.location || ''}</div>
+        <div class="card-name" style="font-size:21px; color:#a00;">VACANT</div>
+        <div class="card-title" style="font-size:14px;">previously: ${data.departed_name || 'Unknown'}</div>
+        <div class="card-location" style="font-size:13px;">${data.location || ''}</div>
       </div>
     `;
   }
@@ -231,12 +231,12 @@ function nodeContent(d) {
       : '';
 
   return `
-    <div class="org-card" data-node-id="${data.id}" style="position:relative; width:100%; height:100%; border:2px solid ${color}; border-radius:8px; background:#fff; padding:10px 12px ${data.seller ? 22 : 10}px 12px; font-family:inherit; opacity:${opacity}; filter:${filterCss};">
+    <div class="org-card" data-node-id="${data.id}" style="position:relative; width:100%; height:100%; border:2px solid ${color}; border-radius:8px; background:#fff; padding:11px 13px ${data.seller ? 26 : 11}px 13px; font-family:inherit; opacity:${opacity}; filter:${filterCss};">
       ${badge}
-      <div class="card-name" style="font-size:17px;">${data.name}</div>
-      <div class="card-title" style="font-size:11.5px;">${data.title || ''}</div>
-      <div class="card-location" style="font-size:10px;">${data.location || ''}</div>
-      ${data.seller ? `<div class="card-seller" style="font-size:11px; right:10px; bottom:6px; color:${color};">${data.seller}</div>` : ''}
+      <div class="card-name" style="font-size:22px;">${data.name}</div>
+      <div class="card-title" style="font-size:15px;">${data.title || ''}</div>
+      <div class="card-location" style="font-size:13px;">${data.location || ''}</div>
+      ${data.seller ? `<div class="card-seller" style="font-size:14px; right:12px; bottom:7px; color:${color};">${data.seller}</div>` : ''}
     </div>
   `;
 }
@@ -278,8 +278,8 @@ function renderChart(data) {
     .data(data)
     .nodeId((d) => d.id)
     .parentNodeId((d) => d.manager_id)
-    .nodeWidth(() => 240)
-    .nodeHeight(() => 122)
+    .nodeWidth(() => 260)
+    .nodeHeight(() => 140)
     .childrenMargin(() => 50)
     .compactMarginBetween(() => 25)
     .compactMarginPair(() => 60)
@@ -288,7 +288,7 @@ function renderChart(data) {
     .buttonContent(() => '') // hide the built-in expand/collapse chevron+count badge
     .nodeContent(nodeContent)
     .onNodeClick(handleNodeClick)
-    .onZoom(() => scheduleRectRefresh())
+    .onZoom(() => updateVpBackdropsFromDom()) // immediate, not debounced - pan/zoom doesn't animate card layout, so positions are already accurate
     .linkUpdate(function (d) {
       d3.select(this)
         .attr('stroke', d.data._upToTheRootHighlighted ? '#E27396' : '#1a3a6b')
@@ -312,6 +312,11 @@ function renderChart(data) {
     svg.style.zIndex = '1';
   }
 
+  // Namespaced so it coexists with d3-org-chart's own internal zoom handler
+  // rather than replacing it. Fires once a pan/zoom gesture finishes (not on
+  // every intermediate tick), so it never fights the user mid-drag.
+  chart.getChartState().zoomBehavior.on('end.chainGuard', keepChainInView);
+
   scheduleRectRefresh();
 }
 
@@ -322,6 +327,14 @@ function scheduleRectRefresh() {
 }
 
 // ---------- VP group backdrops ----------
+
+function darkenColor(hex, amount) {
+  const num = parseInt(hex.slice(1), 16);
+  const r = Math.round(((num >> 16) & 255) * (1 - amount));
+  const g = Math.round(((num >> 8) & 255) * (1 - amount));
+  const b = Math.round((num & 255) * (1 - amount));
+  return `rgb(${r}, ${g}, ${b})`;
+}
 
 function updateVpBackdropsFromDom() {
   const layer = document.getElementById('vpBackdropLayer');
@@ -340,23 +353,51 @@ function updateVpBackdropsFromDom() {
   if (visibleVps.length < 2) return;
 
   const containerRect = document.getElementById('chart').getBoundingClientRect();
-  const padding = 16;
+  const desiredPadding = 16;
+  const minGap = 10; // always leave at least this much space between two bubbles
 
-  visibleVps.forEach((vpNode, i) => {
+  // Raw (unpadded) bounding box per VP's own card + all of its descendants,
+  // in #chart-local coordinates.
+  const groups = visibleVps.map((vpNode) => {
     const descendantIds = new Set();
     const collect = (pid) => {
       descendantIds.add(pid);
       flatData.filter((d) => d.manager_id === pid).forEach((c) => collect(c.id));
     };
     collect(vpNode.id);
-
     const groupCards = cards.filter((n) => descendantIds.has(n.id));
-    if (!groupCards.length) return;
+    if (!groupCards.length) return null;
+    return {
+      vpId: vpNode.id,
+      rawMinX: Math.min(...groupCards.map((n) => n.rect.left)) - containerRect.left,
+      rawMaxX: Math.max(...groupCards.map((n) => n.rect.right)) - containerRect.left,
+      rawMinY: Math.min(...groupCards.map((n) => n.rect.top)) - containerRect.top,
+      rawMaxY: Math.max(...groupCards.map((n) => n.rect.bottom)) - containerRect.top,
+    };
+  }).filter(Boolean);
 
-    const minX = Math.min(...groupCards.map((n) => n.rect.left)) - containerRect.left - padding;
-    const maxX = Math.max(...groupCards.map((n) => n.rect.right)) - containerRect.left + padding;
-    const minY = Math.min(...groupCards.map((n) => n.rect.top)) - containerRect.top - padding;
-    const maxY = Math.max(...groupCards.map((n) => n.rect.bottom)) - containerRect.top + padding;
+  // Bubbles only ever overlap horizontally (VPs sit side by side at the same
+  // level) - cap each side's padding at half the gap to its nearest
+  // neighbor, minus a hard minimum gap, so two bubbles can never touch.
+  groups.sort((a, b) => a.rawMinX - b.rawMinX);
+  groups.forEach((g, i) => {
+    const left = groups[i - 1];
+    const right = groups[i + 1];
+    const leftAvail = left ? Math.max(0, (g.rawMinX - left.rawMaxX - minGap) / 2) : desiredPadding;
+    const rightAvail = right ? Math.max(0, (right.rawMinX - g.rawMaxX - minGap) / 2) : desiredPadding;
+    g.padLeft = Math.min(desiredPadding, leftAvail);
+    g.padRight = Math.min(desiredPadding, rightAvail);
+  });
+
+  const labelHeight = 16;
+  const labelAreaHeight = labelHeight + 12; // extra room above the VP's own card reserved just for the label
+
+  groups.forEach((g, i) => {
+    const minX = g.rawMinX - g.padLeft;
+    const maxX = g.rawMaxX + g.padRight;
+    const minY = g.rawMinY - desiredPadding - labelAreaHeight;
+    const maxY = g.rawMaxY + desiredPadding;
+    const color = VP_PASTELS[i % VP_PASTELS.length];
 
     const backdrop = document.createElement('div');
     backdrop.className = 'vp-backdrop';
@@ -364,8 +405,21 @@ function updateVpBackdropsFromDom() {
     backdrop.style.top = `${minY}px`;
     backdrop.style.width = `${maxX - minX}px`;
     backdrop.style.height = `${maxY - minY}px`;
-    backdrop.style.background = VP_PASTELS[i % VP_PASTELS.length];
+    backdrop.style.background = color;
     layer.appendChild(backdrop);
+
+    // Pinned to the top-left of whichever part of the bubble is currently
+    // scrolled into view (clamped to #chart's own bounds, since that's the
+    // visible viewport), but never lower than the reserved label area above
+    // the VP's own card, so it can't dip down and overlap that card.
+    const vp = flatData.find((d) => d.id === g.vpId);
+    const label = document.createElement('div');
+    label.className = 'vp-backdrop-label';
+    label.textContent = vp ? `${vp.name}'s Org` : '';
+    label.style.color = darkenColor(color, 0.42);
+    label.style.left = `${Math.min(Math.max(minX, 0) + 8, Math.max(maxX - 60, minX))}px`;
+    label.style.top = `${Math.min(Math.max(minY, 0) + 6, g.rawMinY - labelHeight - 4)}px`;
+    layer.appendChild(label);
   });
 }
 
@@ -441,6 +495,66 @@ function showFullOrg() {
   greyedSiblingIds = new Set();
   chart.data(originalOrder).render();
   applyDepthLimit();
+}
+
+// When an org is too wide for the viewport, the selected card's path back to
+// the top of the chart should never fully scroll out of view. Runs once a
+// pan/zoom gesture ends; if the whole chain has drifted off one side, nudges
+// the view back just enough to bring it in, rather than re-centering.
+function keepChainInView() {
+  if (currentIsolatedId == null || !chart) return;
+
+  const chainIds = [];
+  let cur = flatData.find((d) => d.id === currentIsolatedId);
+  while (cur) {
+    chainIds.push(cur.id);
+    cur = cur.manager_id != null ? flatData.find((d) => d.id === cur.manager_id) : null;
+  }
+  if (!chainIds.length) return;
+
+  const cardsById = new Map();
+  document.querySelectorAll('#chart .org-card').forEach((el) => {
+    cardsById.set(Number(el.dataset.nodeId), el.getBoundingClientRect());
+  });
+
+  const containerRect = document.getElementById('chart').getBoundingClientRect();
+  const minVisible = 60; // require at least this many px of EVERY chain card actually showing, not just a sliver
+
+  // Checking only the union of all chain cards' boxes can miss this: if the
+  // chain spans wide, one card (often the root, farthest from whatever's
+  // selected) can be almost entirely clipped while the union still reads as
+  // "visible" overall. So the trigger is the worst individual card, while
+  // the correction itself still re-centers the whole chain's bounding box
+  // together (it's narrow enough that this keeps every card in view at once).
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+  let minCardVisibleX = Infinity, minCardVisibleY = Infinity;
+  let found = false;
+  for (const id of chainIds) {
+    const r = cardsById.get(id);
+    if (!r) continue;
+    found = true;
+    minX = Math.min(minX, r.left);
+    maxX = Math.max(maxX, r.right);
+    minY = Math.min(minY, r.top);
+    maxY = Math.max(maxY, r.bottom);
+    minCardVisibleX = Math.min(minCardVisibleX, Math.min(r.right, containerRect.right) - Math.max(r.left, containerRect.left));
+    minCardVisibleY = Math.min(minCardVisibleY, Math.min(r.bottom, containerRect.bottom) - Math.max(r.top, containerRect.top));
+  }
+  if (!found) return;
+
+  let dx = 0;
+  let dy = 0;
+  if (minCardVisibleX < minVisible) {
+    dx = (containerRect.left + containerRect.right) / 2 - (minX + maxX) / 2;
+  }
+  if (minCardVisibleY < minVisible) {
+    dy = (containerRect.top + containerRect.bottom) / 2 - (minY + maxY) / 2;
+  }
+
+  if (dx !== 0 || dy !== 0) {
+    const { svg, zoomBehavior } = chart.getChartState();
+    svg.transition().duration(250).call(zoomBehavior.translateBy, dx, dy);
+  }
 }
 
 // ---------- Detail panel ----------
@@ -756,6 +870,41 @@ function applySort(mode) {
   scheduleRectRefresh();
 }
 
+// Shows the union of every flagged person's full org (their ancestors, so
+// you can see where they sit, plus their own descendants) - same shape as
+// isolatePerson(), just unioned across everyone matching the chosen signals
+// instead of a single click target.
+function isolateByPriority(values) {
+  currentIsolatedId = null;
+  greyedSiblingIds = new Set();
+
+  if (values.size === 0) {
+    chart.data(originalOrder).render();
+    applyDepthLimit();
+    return;
+  }
+
+  const flagged = flatData.filter((d) => d.status === 'active' && values.has(d.priority_signal));
+  const keepIds = new Set();
+  flagged.forEach((person) => {
+    let cur = person;
+    while (cur) {
+      keepIds.add(cur.id);
+      cur = cur.manager_id != null ? flatData.find((d) => d.id === cur.manager_id) : null;
+    }
+    const collectDescendants = (pid) => {
+      keepIds.add(pid);
+      flatData.filter((d) => d.manager_id === pid).forEach((c) => collectDescendants(c.id));
+    };
+    collectDescendants(person.id);
+  });
+
+  const filtered = flatData.filter((d) => keepIds.has(d.id));
+  chart.data(filtered).render();
+  chart.expandAll().fit();
+  scheduleRectRefresh();
+}
+
 // ---------- Search ----------
 
 function focusOnPerson(name) {
@@ -888,9 +1037,33 @@ async function init() {
     chart.clearHighlighting();
     showFullOrg();
     buildClientOrgDrilldown();
+    document.getElementById('sortBy').value = 'none';
+    document.getElementById('prioritySortOptions').style.display = 'none';
+    document.getElementById('priorityWatchChk').checked = false;
+    document.getElementById('priorityHighChk').checked = false;
   });
 
-  document.getElementById('sortBy').addEventListener('change', (e) => applySort(e.target.value));
+  function applyPriorityFilterFromCheckboxes() {
+    const values = new Set();
+    if (document.getElementById('priorityWatchChk').checked) values.add('watch');
+    if (document.getElementById('priorityHighChk').checked) values.add('high');
+    isolateByPriority(values);
+  }
+
+  document.getElementById('sortBy').addEventListener('change', (e) => {
+    const mode = e.target.value;
+    const prioRow = document.getElementById('prioritySortOptions');
+    if (mode === 'priority') {
+      prioRow.style.display = '';
+      applyPriorityFilterFromCheckboxes();
+    } else {
+      prioRow.style.display = 'none';
+      applySort(mode);
+    }
+  });
+
+  document.getElementById('priorityWatchChk').addEventListener('change', applyPriorityFilterFromCheckboxes);
+  document.getElementById('priorityHighChk').addEventListener('change', applyPriorityFilterFromCheckboxes);
 
   document.getElementById('depthSlider').addEventListener('input', (e) => {
     depthSliderValue = Number(e.target.value);
