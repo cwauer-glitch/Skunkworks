@@ -82,6 +82,21 @@ body {
   max-width: 150px;
 }
 
+.drilldown-container {
+  margin-bottom: 10px;
+}
+
+.drilldown-row {
+  margin-bottom: 6px;
+  padding-left: 10px;
+  border-left: 2px solid #3a4150;
+}
+
+.drilldown-row label {
+  font-size: 11px;
+  opacity: 0.8;
+}
+
 .control-row button {
   width: 100%;
 }

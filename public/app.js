@@ -145,50 +145,66 @@ function buildAmFilter() {
   }
 }
 
-// ---------- Hover-magnify state ----------
+// ---------- Show Client Org: cascading drill-down ----------
 //
-// Driven through d3-org-chart's real layout engine (nodeWidth/nodeHeight/
-// margins), not a CSS transform - so the tree actually re-flows and spaces
-// itself out around enlarged cards, the way the rest of the chart already
-// lays out. magnifyScale holds each node's current size multiplier;
-// baseNodePositions is the screen position of every card at scale 1,
-// captured after each "real" (non-hover) render and used as the stable
-// distance reference for the whole hover gesture - if we measured against
-// live (already-magnified) positions instead, the effect would feed back on
-// itself and drift.
+// One dropdown per level, starting at the CTO. Picking someone reveals a new
+// dropdown for their direct reports and isolates that person's org (same as
+// clicking their card); changing an earlier dropdown discards everything
+// below it, since those levels belonged to the old selection.
 
-let magnifyScale = new Map();
-let baseNodePositions = new Map();
-const MAGNIFY_RADIUS = 260;
-const MAGNIFY_SIGMA = MAGNIFY_RADIUS / 2.2;
-const MAX_BOOST_CAP = 9; // generous ceiling for extreme zoom-out (avoids runaway scale)
-const HOVER_RENDER_THROTTLE_MS = 110;
-let lastHoverRenderAt = 0;
+function buildDrilldownLevel(managerId, container) {
+  const reports = flatData
+    .filter((d) => d.manager_id === managerId && d.status === 'active')
+    .sort((a, b) => a.name.localeCompare(b.name));
+  if (!reports.length) return;
 
-function magnifyFactor(id) {
-  return magnifyScale.get(id) || 1;
+  const row = document.createElement('div');
+  row.className = 'control-row drilldown-row';
+  row.innerHTML = `
+    <label>${reports[0].level || 'Reports'}</label>
+    <select><option value="">— choose —</option>${reports.map((r) => `<option value="${r.id}">${r.name}</option>`).join('')}</select>
+  `;
+  container.appendChild(row);
+
+  row.querySelector('select').addEventListener('change', (e) => {
+    let sibling = row.nextElementSibling;
+    while (sibling) {
+      const toRemove = sibling;
+      sibling = sibling.nextElementSibling;
+      toRemove.remove();
+    }
+    if (!e.target.value) return;
+    const id = Number(e.target.value);
+    isolatePerson(id);
+    buildDrilldownLevel(id, container);
+  });
 }
 
-function currentZoomScale() {
-  try {
-    return chart.getChartState().lastTransform.k || 1;
-  } catch (e) {
-    return 1;
-  }
+function buildClientOrgDrilldown() {
+  const container = document.getElementById('clientOrgDrilldown');
+  container.innerHTML = '';
+  const root = flatData.find((d) => d.manager_id == null);
+  if (!root) return;
+
+  const rootRow = document.createElement('div');
+  rootRow.className = 'control-row drilldown-row';
+  rootRow.innerHTML = `<label>${root.level || 'Top'}</label><select><option value="${root.id}">${root.name}</option></select>`;
+  container.appendChild(rootRow);
+
+  buildDrilldownLevel(root.id, container);
 }
 
 // ---------- Chart rendering ----------
 
 function nodeContent(d) {
   const data = d.data;
-  const scale = magnifyFactor(data.id);
 
   if (data.status === 'vacant') {
     return `
-      <div class="org-card" data-node-id="${data.id}" style="width:100%; height:100%; border:3px solid #d33; border-radius:8px; background:#fdeaea; padding:${10 * scale}px ${12 * scale}px; font-family:inherit;">
-        <div class="card-name" style="font-size:${16 * scale}px; color:#a00;">VACANT</div>
-        <div class="card-title" style="font-size:${11 * scale}px;">previously: ${data.departed_name || 'Unknown'}</div>
-        <div class="card-location" style="font-size:${10 * scale}px;">${data.location || ''}</div>
+      <div class="org-card" data-node-id="${data.id}" style="width:100%; height:100%; border:3px solid #d33; border-radius:8px; background:#fdeaea; padding:10px 12px; font-family:inherit;">
+        <div class="card-name" style="font-size:16px; color:#a00;">VACANT</div>
+        <div class="card-title" style="font-size:11px;">previously: ${data.departed_name || 'Unknown'}</div>
+        <div class="card-location" style="font-size:10px;">${data.location || ''}</div>
       </div>
     `;
   }
@@ -215,12 +231,12 @@ function nodeContent(d) {
       : '';
 
   return `
-    <div class="org-card" data-node-id="${data.id}" style="position:relative; width:100%; height:100%; border:2px solid ${color}; border-radius:8px; background:#fff; padding:${10 * scale}px ${12 * scale}px ${(data.seller ? 22 : 10) * scale}px ${12 * scale}px; font-family:inherit; opacity:${opacity}; filter:${filterCss};">
+    <div class="org-card" data-node-id="${data.id}" style="position:relative; width:100%; height:100%; border:2px solid ${color}; border-radius:8px; background:#fff; padding:10px 12px ${data.seller ? 22 : 10}px 12px; font-family:inherit; opacity:${opacity}; filter:${filterCss};">
       ${badge}
-      <div class="card-name" style="font-size:${17 * scale}px;">${data.name}</div>
-      <div class="card-title" style="font-size:${11.5 * scale}px;">${data.title || ''}</div>
-      <div class="card-location" style="font-size:${10 * scale}px;">${data.location || ''}</div>
-      ${data.seller ? `<div class="card-seller" style="font-size:${11 * scale}px; right:${10 * scale}px; bottom:${6 * scale}px; color:${color};">${data.seller}</div>` : ''}
+      <div class="card-name" style="font-size:17px;">${data.name}</div>
+      <div class="card-title" style="font-size:11.5px;">${data.title || ''}</div>
+      <div class="card-location" style="font-size:10px;">${data.location || ''}</div>
+      ${data.seller ? `<div class="card-seller" style="font-size:11px; right:10px; bottom:6px; color:${color};">${data.seller}</div>` : ''}
     </div>
   `;
 }
@@ -250,7 +266,6 @@ function smoothDiagonal(s, t, _m, offsets = {}) {
 }
 
 function renderChart(data) {
-  magnifyScale = new Map();
   const container = document.getElementById('chart');
   container.innerHTML = '';
 
@@ -263,13 +278,12 @@ function renderChart(data) {
     .data(data)
     .nodeId((d) => d.id)
     .parentNodeId((d) => d.manager_id)
-    .nodeWidth((d) => 240 * magnifyFactor(d.data.id))
-    .nodeHeight((d) => 122 * magnifyFactor(d.data.id))
-    .childrenMargin((d) => 50 * magnifyFactor(d.data.id))
+    .nodeWidth(() => 240)
+    .nodeHeight(() => 122)
+    .childrenMargin(() => 50)
     .compactMarginBetween(() => 25)
     .compactMarginPair(() => 60)
-    .neighbourMargin((a, b) => 30 * Math.max(magnifyFactor(a.data.id), magnifyFactor(b.data.id)))
-    .duration(220)
+    .neighbourMargin(() => 30)
     .linkYOffset(0) // default 30px Safari fudge-factor was leaving a visible gap above every card
     .buttonContent(() => '') // hide the built-in expand/collapse chevron+count badge
     .nodeContent(nodeContent)
@@ -301,59 +315,10 @@ function renderChart(data) {
   scheduleRectRefresh();
 }
 
-function captureBasePositions() {
-  const cards = document.querySelectorAll('#chart .org-card');
-  baseNodePositions = new Map();
-  cards.forEach((el) => {
-    const rect = el.getBoundingClientRect();
-    baseNodePositions.set(Number(el.dataset.nodeId), { cx: rect.left + rect.width / 2, cy: rect.top + rect.height / 2 });
-  });
-  updateVpBackdropsFromDom();
-}
-
 function scheduleRectRefresh() {
   // d3-org-chart animates layout changes - wait for it to settle before
-  // caching screen positions, or the magnify distance reference would be stale.
-  setTimeout(captureBasePositions, 280);
-}
-
-// Recomputes each node's magnify factor from its distance (at the stable,
-// unmagnified base layout) to the cursor, then does a REAL re-render so
-// nodeWidth/nodeHeight/margins above actually push the tree apart - this is
-// what makes enlarged cards never overlap their neighbors.
-function applyMagnifyAtCursor(clientX, clientY) {
-  if (!chart || baseNodePositions.size === 0) return;
-  const k = currentZoomScale();
-  const boost = Math.max(0, Math.min(1 / k - 1, MAX_BOOST_CAP));
-
-  const newScale = new Map();
-  for (const [id, pos] of baseNodePositions) {
-    const dx = clientX - pos.cx;
-    const dy = clientY - pos.cy;
-    const dist = Math.sqrt(dx * dx + dy * dy);
-    if (dist >= MAGNIFY_RADIUS) continue;
-    const bell = Math.exp(-(dist * dist) / (2 * MAGNIFY_SIGMA * MAGNIFY_SIGMA));
-    const factor = 1 + boost * bell;
-    if (factor > 1.02) newScale.set(id, factor);
-  }
-
-  magnifyScale = newScale;
-  chart.render();
-  updateVpBackdropsFromDom();
-}
-
-function handleChartMouseMove(e) {
-  const now = performance.now();
-  if (now - lastHoverRenderAt < HOVER_RENDER_THROTTLE_MS) return;
-  lastHoverRenderAt = now;
-  applyMagnifyAtCursor(e.clientX, e.clientY);
-}
-
-function handleChartMouseLeave() {
-  if (magnifyScale.size === 0) return;
-  magnifyScale = new Map();
-  chart.render();
-  updateVpBackdropsFromDom();
+  // measuring screen positions for the VP backdrops below.
+  setTimeout(updateVpBackdropsFromDom, 280);
 }
 
 // ---------- VP group backdrops ----------
@@ -410,7 +375,6 @@ function applyDepthLimit() {
   const viewRootId = currentIsolatedId != null ? currentIsolatedId : trueRootId();
   if (viewRootId == null) return;
 
-  magnifyScale = new Map(); // any in-progress hover-magnify is stale once navigation changes the view
   chart.collapseAll();
 
   // d3-org-chart's _expanded flag reveals the FLAGGED node itself, by
@@ -781,7 +745,6 @@ function handleArrowKeyPan(e) {
 // ---------- Sort ----------
 
 function applySort(mode) {
-  magnifyScale = new Map();
   if (mode === 'none') {
     chart.data(currentIsolatedId != null ? chart.data() : originalOrder).render();
   } else {
@@ -823,6 +786,7 @@ async function loadOrgData(orgId) {
 
   meta.sellers.forEach((s) => colorForSeller(s));
   buildAmFilter();
+  buildClientOrgDrilldown();
 
   renderChart(flatData);
   applyDepthLimit();
@@ -898,8 +862,6 @@ function setupModal(modalId, cancelId) {
 async function init() {
   await loadOrgSwitcher();
 
-  document.getElementById('chart').addEventListener('mousemove', handleChartMouseMove);
-  document.getElementById('chart').addEventListener('mouseleave', handleChartMouseLeave);
   window.addEventListener('resize', () => scheduleRectRefresh());
   document.addEventListener('keydown', handleArrowKeyPan);
 
@@ -925,6 +887,7 @@ async function init() {
     document.getElementById('search').value = '';
     chart.clearHighlighting();
     showFullOrg();
+    buildClientOrgDrilldown();
   });
 
   document.getElementById('sortBy').addEventListener('change', (e) => applySort(e.target.value));
