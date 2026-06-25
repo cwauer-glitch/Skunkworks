@@ -16,6 +16,12 @@ let greyedSiblingIds = new Set();
 
 const VP_PASTELS = ['#fde2e2', '#e2f0fd', '#e2fde6', '#fdf6e2', '#f0e2fd', '#e2fdfa', '#fde2f6', '#eaf5d8'];
 
+function escapeHtml(str) {
+  const div = document.createElement('div');
+  div.textContent = str;
+  return div.innerHTML;
+}
+
 function colorForSeller(seller) {
   if (!seller) return '#9aa0a6';
   if (!sellerColorMap.has(seller)) {
@@ -146,7 +152,7 @@ function nodeContent(d) {
 
   if (data.status === 'vacant') {
     return `
-      <div class="org-card" data-node-id="${data.id}" style="width:220px; border:3px solid #d33; border-radius:8px; background:#fdeaea; padding:8px 10px; font-family:inherit;">
+      <div class="org-card" data-node-id="${data.id}" style="width:100%; height:100%; border:3px solid #d33; border-radius:8px; background:#fdeaea; padding:8px 10px; font-family:inherit;">
         <div class="node-card-title" style="color:#a00;">VACANT</div>
         <div class="node-card-sub">previously: ${data.departed_name || 'Unknown'}</div>
         <div class="node-card-sub">${data.location || ''}</div>
@@ -176,7 +182,7 @@ function nodeContent(d) {
       : '';
 
   return `
-    <div class="org-card" data-node-id="${data.id}" style="position:relative; width:220px; border:2px solid ${color}; border-radius:8px; background:#fff; padding:8px 10px; font-family:inherit; opacity:${opacity}; filter:${filterCss};">
+    <div class="org-card" data-node-id="${data.id}" style="position:relative; width:100%; height:100%; border:2px solid ${color}; border-radius:8px; background:#fff; padding:8px 10px; font-family:inherit; opacity:${opacity}; filter:${filterCss};">
       ${badge}
       <div class="node-card-title">${data.name}</div>
       <div class="node-card-sub">${data.title || ''}</div>
@@ -229,6 +235,8 @@ function renderChart(data) {
     .compactMarginBetween(() => 25)
     .compactMarginPair(() => 60)
     .neighbourMargin(() => 30)
+    .linkYOffset(0) // default 30px Safari fudge-factor was leaving a visible gap above every card
+    .buttonContent(() => '') // hide the built-in expand/collapse chevron+count badge
     .nodeContent(nodeContent)
     .onNodeClick(handleNodeClick)
     .onZoom(() => scheduleRectRefresh())
@@ -268,7 +276,6 @@ function renderChart(data) {
 // smooth lens rather than a hard-edged circle.
 
 let nodeRects = [];
-let scaledEls = new Set();
 let mouseMoveRafPending = false;
 const MAGNIFY_RADIUS = 260;
 const MAGNIFY_SIGMA = MAGNIFY_RADIUS / 2.2;
@@ -297,6 +304,53 @@ function scheduleRectRefresh() {
   setTimeout(refreshNodeRects, 450);
 }
 
+// Groups cards into visual rows by Y center (siblings share a row) so the
+// overlap-avoidance reflow below only ever shifts cards horizontally within
+// their own row, never across parent/child levels.
+function groupIntoRows(nodes) {
+  const sorted = [...nodes].sort((a, b) => a.cy - b.cy);
+  const rows = [];
+  let row = [];
+  let rowY = null;
+  for (const n of sorted) {
+    if (rowY === null || Math.abs(n.cy - rowY) < 20) {
+      row.push(n);
+      rowY = row.reduce((sum, x) => sum + x.cy, 0) / row.length;
+    } else {
+      rows.push(row);
+      row = [n];
+      rowY = n.cy;
+    }
+  }
+  if (row.length) rows.push(row);
+  return rows;
+}
+
+// Growing a card via scale() alone makes it overlap its neighbors. This
+// spreads same-row siblings apart from the cursor's X position - like a
+// fisheye dock - so enlarged cards always have room, growing the gap instead
+// of overlapping it. Nodes are only ever pushed away from their base
+// position, anchored at whichever card in each direction is closest to the
+// cursor, so the spreading cascades outward symmetrically.
+function reflowRow(row, cursorX) {
+  const gap = 14;
+  const rightGroup = row.filter((n) => n.cx > cursorX).sort((a, b) => a.cx - b.cx);
+  const leftGroup = row.filter((n) => n.cx <= cursorX).sort((a, b) => b.cx - a.cx);
+
+  rightGroup.forEach((n, i) => {
+    if (i === 0) { n.offsetX = 0; return; }
+    const prev = rightGroup[i - 1];
+    const minCx = (prev.cx + prev.offsetX) + prev.halfWidth + gap + n.halfWidth;
+    n.offsetX = Math.max(0, minCx - n.cx);
+  });
+  leftGroup.forEach((n, i) => {
+    if (i === 0) { n.offsetX = 0; return; }
+    const prev = leftGroup[i - 1];
+    const maxCx = (prev.cx + prev.offsetX) - prev.halfWidth - gap - n.halfWidth;
+    n.offsetX = Math.min(0, maxCx - n.cx);
+  });
+}
+
 function handleChartMouseMove(e) {
   if (mouseMoveRafPending) return;
   mouseMoveRafPending = true;
@@ -304,26 +358,27 @@ function handleChartMouseMove(e) {
     mouseMoveRafPending = false;
     const k = currentZoomScale();
     const boost = Math.max(0, Math.min(1 / k - 1, MAX_BOOST_CAP));
-    const stillScaled = new Set();
+
     for (const node of nodeRects) {
       const dx = e.clientX - node.cx;
       const dy = e.clientY - node.cy;
       const dist = Math.sqrt(dx * dx + dy * dy);
-      if (dist < MAGNIFY_RADIUS) {
-        const bell = Math.exp(-(dist * dist) / (2 * MAGNIFY_SIGMA * MAGNIFY_SIGMA));
-        const scale = 1 + boost * bell;
-        node.el.style.transform = `scale(${scale})`;
-        node.el.style.zIndex = '10';
-        stillScaled.add(node.el);
-      }
+      const bell = dist < MAGNIFY_RADIUS
+        ? Math.exp(-(dist * dist) / (2 * MAGNIFY_SIGMA * MAGNIFY_SIGMA))
+        : 0;
+      node.scale = 1 + boost * bell;
+      node.halfWidth = (node.rect.width / 2) * node.scale;
+      node.offsetX = 0;
     }
-    for (const el of scaledEls) {
-      if (!stillScaled.has(el)) {
-        el.style.transform = 'scale(1)';
-        el.style.zIndex = '';
-      }
+
+    for (const row of groupIntoRows(nodeRects)) {
+      reflowRow(row, e.clientX);
     }
-    scaledEls = stillScaled;
+
+    for (const node of nodeRects) {
+      node.el.style.transform = `translateX(${node.offsetX}px) scale(${node.scale})`;
+      node.el.style.zIndex = node.scale > 1.01 ? '10' : '';
+    }
   });
 }
 
@@ -503,6 +558,64 @@ function readPersonForm(prefix) {
   };
 }
 
+// Notes are stored newest-first already (server unshifts on save), so no
+// client-side sorting is needed - "most recent on top" falls out for free.
+function notesSectionHtml(data) {
+  const notes = JSON.parse(data.notes_json || '[]');
+  const items = notes.map((n, i) => `
+    <div class="note-item">
+      <button type="button" class="note-toggle" data-idx="${i}">${new Date(n.created_at).toLocaleString()}</button>
+      <div class="note-body hidden" data-idx="${i}">${escapeHtml(n.text)}</div>
+    </div>
+  `).join('');
+
+  return `
+    <div class="detail-section">
+      <h4>Notes</h4>
+      <div class="modal-actions">
+        <button type="button" id="notesOpenAll">Open all</button>
+        <button type="button" id="notesCloseAll">Close all</button>
+      </div>
+      <div id="notesList" class="notes-list">${items || '<p class="note-empty">No notes yet.</p>'}</div>
+      <textarea id="newNoteText" placeholder="Add a note..."></textarea>
+      <div class="modal-actions"><button type="button" id="saveNoteBtn">Save Note</button></div>
+    </div>
+  `;
+}
+
+// Wires up an already-rendered notesSectionHtml() block: per-note collapse
+// toggles, open/close-all, and saving a new note (which reloads the org and
+// re-opens this same person's panel so the new note shows immediately).
+function wireNotesSection(data) {
+  document.querySelectorAll('#notesList .note-toggle').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const body = document.querySelector(`#notesList .note-body[data-idx="${btn.dataset.idx}"]`);
+      body.classList.toggle('hidden');
+    });
+  });
+  document.getElementById('notesOpenAll').addEventListener('click', () => {
+    document.querySelectorAll('#notesList .note-body').forEach((b) => b.classList.remove('hidden'));
+  });
+  document.getElementById('notesCloseAll').addEventListener('click', () => {
+    document.querySelectorAll('#notesList .note-body').forEach((b) => b.classList.add('hidden'));
+  });
+  document.getElementById('saveNoteBtn').addEventListener('click', async () => {
+    const textarea = document.getElementById('newNoteText');
+    const text = textarea.value.trim();
+    if (!text) return;
+    const res = await editFetch(`/api/orgs/${currentOrgId}/employees/${data.id}/notes`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text }),
+    });
+    if (res) {
+      await loadOrgData(currentOrgId);
+      const refreshed = flatData.find((d) => d.id === data.id);
+      if (refreshed) showDetail(refreshed);
+    }
+  });
+}
+
 function showDetail(data) {
   const panel = document.getElementById('detailPanel');
   const content = document.getElementById('detailContent');
@@ -620,7 +733,10 @@ function showDetail(data) {
       <button id="saveDetailBtn">Save changes</button>
       <button id="markDepartedBtn" class="danger">Mark as Departed</button>
     </div>
+    ${notesSectionHtml(data)}
   `;
+
+  wireNotesSection(data);
 
   const managerSelect = document.getElementById('edManager');
   managerOptions(managerSelect, data.id);
@@ -653,6 +769,29 @@ function showDetail(data) {
 
   panel.classList.remove('hidden');
   panel.classList.add('open');
+}
+
+// ---------- Keyboard panning ----------
+//
+// Arrow key = "look more in this direction": pressing Left slides the chart's
+// content right, revealing more of what was off-screen to the left.
+
+function panChart(dx, dy) {
+  const { svg, zoomBehavior } = chart.getChartState();
+  svg.transition().duration(150).call(zoomBehavior.translateBy, dx, dy);
+}
+
+function handleArrowKeyPan(e) {
+  const panKeys = { ArrowLeft: [1, 0], ArrowRight: [-1, 0], ArrowUp: [0, 1], ArrowDown: [0, -1] };
+  if (!(e.key in panKeys)) return;
+
+  const tag = document.activeElement && document.activeElement.tagName;
+  if (['INPUT', 'SELECT', 'TEXTAREA'].includes(tag)) return; // don't hijack form controls/slider
+
+  e.preventDefault();
+  const step = 120;
+  const [dirX, dirY] = panKeys[e.key];
+  panChart(dirX * step, dirY * step);
 }
 
 // ---------- Sort ----------
@@ -776,6 +915,7 @@ async function init() {
 
   document.getElementById('chart').addEventListener('mousemove', handleChartMouseMove);
   window.addEventListener('resize', () => scheduleRectRefresh());
+  document.addEventListener('keydown', handleArrowKeyPan);
 
   document.getElementById('sidebarToggle').addEventListener('click', () => {
     const sidebar = document.getElementById('sidebar');

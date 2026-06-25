@@ -35,6 +35,14 @@ function recordVersion(orgId) {
   db.prepare('INSERT INTO org_versions (org_id, snapshot_json) VALUES (?, ?)').run(orgId, JSON.stringify(rows));
 }
 
+// Notes live as a JSON array right on the employee row, so they're
+// automatically captured by recordVersion()/restore without any extra
+// plumbing. Migrates the already-deployed Railway DB on boot too.
+const employeeColumns = db.prepare('PRAGMA table_info(employees)').all().map((c) => c.name);
+if (!employeeColumns.includes('notes_json')) {
+  db.exec("ALTER TABLE employees ADD COLUMN notes_json TEXT NOT NULL DEFAULT '[]'");
+}
+
 // Seed version 1 for any org that doesn't have history yet (first boot after
 // this migration, or an org created before version history existed).
 for (const org of db.prepare('SELECT id FROM organizations').all()) {
@@ -136,6 +144,7 @@ app.get('/api/orgs/:orgId/versions/:versionId', (req, res) => {
 const EMPLOYEE_COLUMNS = [
   'id', 'org_id', 'name', 'title', 'level', 'division', 'location', 'seller', 'seller_territory',
   'manager_id', 'status', 'departed_name', 'priority_tags', 'priority_goal', 'priority_signal',
+  'notes_json',
 ];
 
 function insertEmployeeRow(record) {
@@ -198,6 +207,24 @@ app.patch('/api/orgs/:orgId/employees/:id', requirePasscode, (req, res) => {
   const setClause = Object.keys(updates).map((k) => `${k} = ?`).join(', ');
   db.prepare(`UPDATE employees SET ${setClause} WHERE id = ?`).run(...Object.values(updates), id);
   recordVersion(orgId);
+  res.json(db.prepare('SELECT * FROM employees WHERE id = ?').get(id));
+});
+
+// Notes are newest-first in storage, so the client never has to re-sort.
+app.post('/api/orgs/:orgId/employees/:id/notes', requirePasscode, (req, res) => {
+  const orgId = Number(req.params.orgId);
+  const id = Number(req.params.id);
+  const employee = db.prepare('SELECT * FROM employees WHERE org_id = ? AND id = ?').get(orgId, id);
+  if (!employee) return res.status(404).json({ error: 'Employee not found' });
+
+  const text = (req.body.text || '').trim();
+  if (!text) return res.status(400).json({ error: 'Note text is required' });
+
+  const notes = JSON.parse(employee.notes_json || '[]');
+  notes.unshift({ text, created_at: new Date().toISOString() });
+  db.prepare('UPDATE employees SET notes_json = ? WHERE id = ?').run(JSON.stringify(notes), id);
+  recordVersion(orgId);
+
   res.json(db.prepare('SELECT * FROM employees WHERE id = ?').get(id));
 });
 

@@ -54,7 +54,8 @@ CREATE TABLE employees (
     departed_name TEXT,
     priority_tags TEXT,
     priority_goal TEXT,
-    priority_signal TEXT NOT NULL DEFAULT 'none'
+    priority_signal TEXT NOT NULL DEFAULT 'none',
+    notes_json TEXT NOT NULL DEFAULT '[]'
 );
 CREATE INDEX idx_employees_org ON employees(org_id);
 CREATE INDEX idx_employees_manager ON employees(manager_id);
@@ -93,14 +94,15 @@ for row in rows:
         "priority_tags": clean(priority_tags),
         "priority_goal": clean(priority_goal),
         "priority_signal": "none",
+        "notes_json": "[]",
     }
     inserted_rows.append(record)
     cur.execute(
         """INSERT INTO employees
            (id, org_id, name, title, level, division, location, seller, seller_territory,
-            manager_id, status, departed_name, priority_tags, priority_goal, priority_signal)
+            manager_id, status, departed_name, priority_tags, priority_goal, priority_signal, notes_json)
            VALUES (:id, :org_id, :name, :title, :level, :division, :location, :seller, :seller_territory,
-                   :manager_id, :status, :departed_name, :priority_tags, :priority_goal, :priority_signal)""",
+                   :manager_id, :status, :departed_name, :priority_tags, :priority_goal, :priority_signal, :notes_json)""",
         record,
     )
 
