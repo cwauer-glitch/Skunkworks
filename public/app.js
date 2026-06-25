@@ -318,7 +318,13 @@ function renderChart(data) {
   // Namespaced so it coexists with d3-org-chart's own internal zoom handler
   // rather than replacing it. Fires once a pan/zoom gesture finishes (not on
   // every intermediate tick), so it never fights the user mid-drag.
-  chart.getChartState().zoomBehavior.on('end.chainGuard', keepChainInView);
+  // sourceEvent is only set for genuine user gestures (drag/wheel) - our own
+  // programmatic .fit()/.transform() calls (after every isolate/search/depth
+  // change) also dispatch 'end', and correcting in response to those caused
+  // a visible second jump right after the intended animation finished.
+  chart.getChartState().zoomBehavior.on('end.chainGuard', (event) => {
+    if (event && event.sourceEvent) keepChainInView();
+  });
 
   scheduleRectRefresh();
 }
@@ -392,6 +398,10 @@ function updateVpBackdropsFromDom() {
     };
   }).filter(Boolean);
 
+  const labelHeight = 16;
+  const topLeftMinRoom = labelHeight + 6; // vertical space needed above the VP's own card to fit the label without touching it
+  const minGapToManager = 4; // tighter than the bubble-to-bubble gap - here we just need to clear the card, not leave a generous margin
+
   // Bubbles only ever overlap horizontally (VPs sit side by side at the same
   // level) - cap each side's padding at half the gap to its nearest
   // neighbor, minus a hard minimum gap, so two bubbles can never touch.
@@ -404,14 +414,15 @@ function updateVpBackdropsFromDom() {
     g.padLeft = Math.min(desiredPadding, leftAvail);
     g.padRight = Math.min(desiredPadding, rightAvail);
 
-    // The top can't just take a fixed padding - it must stop short of the
-    // VP's own manager's card (the SVP above), wherever that card actually is.
+    // The top tries to reserve enough room for an in-bubble label by default
+    // (more than the other sides need), but can't cross into the VP's own
+    // manager's card above - whichever is more restrictive wins.
     const managerCard = g.managerId != null ? cardsById.get(g.managerId) : null;
     const managerBottom = managerCard ? managerCard.rect.bottom - containerRect.top : -Infinity;
-    g.minY = Math.max(g.rawMinY - desiredPadding, managerBottom + minGap);
+    g.minY = Math.max(g.rawMinY - topLeftMinRoom, managerBottom + minGapToManager);
   });
 
-  const labelSpecs = [];
+  const belowSpecs = [];
 
   groups.forEach((g, i) => {
     const minX = g.rawMinX - g.padLeft;
@@ -429,18 +440,32 @@ function updateVpBackdropsFromDom() {
     backdrop.style.background = color;
     layer.appendChild(backdrop);
 
-    if (showVpLabels) {
-      const vp = flatData.find((d) => d.id === g.vpId);
-      labelSpecs.push({
-        centerX: (minX + maxX) / 2,
-        bubbleBottom: maxY,
-        color: darkenColor(color, 0.42),
-        text: vp ? deriveFunctionLabel(vp.title) : '',
-      });
+    if (!showVpLabels) return;
+    const vp = flatData.find((d) => d.id === g.vpId);
+    const text = vp ? deriveFunctionLabel(vp.title) : '';
+    const labelColor = darkenColor(color, 0.42);
+
+    // If there's enough room above the VP's own card to fit the label
+    // without ever touching it, it reads better pinned to the bubble's own
+    // top-left, staying visible as you scroll - the entire strip between
+    // the bubble top and the topmost card is guaranteed card-free, so this
+    // can never overlap anything regardless of horizontal position.
+    if (g.rawMinY - minY >= topLeftMinRoom) {
+      const label = document.createElement('div');
+      label.className = 'vp-backdrop-label';
+      label.textContent = text;
+      label.style.color = labelColor;
+      label.style.fontSize = `${labelHeight - 4}px`;
+      layer.appendChild(label);
+      const labelWidth = label.getBoundingClientRect().width;
+      label.style.left = `${Math.min(Math.max(minX, 0) + 8, maxX - labelWidth - 8)}px`;
+      label.style.top = `${Math.min(Math.max(minY, 0) + 6, g.rawMinY - labelHeight - 4)}px`;
+    } else {
+      belowSpecs.push({ centerX: (minX + maxX) / 2, bubbleBottom: maxY, color: labelColor, text });
     }
   });
 
-  if (showVpLabels && labelSpecs.length) renderVpLabels(layer, labelSpecs);
+  if (belowSpecs.length) renderVpLabels(layer, belowSpecs);
 }
 
 // Labels sit just below their own bubble with a short leader line up to it,
@@ -1124,6 +1149,11 @@ async function init() {
     document.getElementById('prioritySortOptions').style.display = 'none';
     document.getElementById('priorityWatchChk').checked = false;
     document.getElementById('priorityHighChk').checked = false;
+  });
+
+  document.getElementById('clearDrilldownBtn').addEventListener('click', () => {
+    showFullOrg();
+    buildClientOrgDrilldown();
   });
 
   function applyPriorityFilterFromCheckboxes() {

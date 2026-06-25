@@ -101,6 +101,12 @@ body {
   width: 100%;
 }
 
+#clearDrilldownBtn {
+  width: auto;
+  font-size: 11px;
+  padding: 3px 8px;
+}
+
 .slider-row {
   display: flex;
   align-items: center;
