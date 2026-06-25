@@ -219,9 +219,10 @@ app.post('/api/orgs/:orgId/employees/:id/notes', requirePasscode, (req, res) => 
 
   const text = (req.body.text || '').trim();
   if (!text) return res.status(400).json({ error: 'Note text is required' });
+  const title = (req.body.title || '').trim();
 
   const notes = JSON.parse(employee.notes_json || '[]');
-  notes.unshift({ text, created_at: new Date().toISOString() });
+  notes.unshift({ title, text, created_at: new Date().toISOString() });
   db.prepare('UPDATE employees SET notes_json = ? WHERE id = ?').run(JSON.stringify(notes), id);
   recordVersion(orgId);
 

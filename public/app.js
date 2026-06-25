@@ -145,17 +145,50 @@ function buildAmFilter() {
   }
 }
 
+// ---------- Hover-magnify state ----------
+//
+// Driven through d3-org-chart's real layout engine (nodeWidth/nodeHeight/
+// margins), not a CSS transform - so the tree actually re-flows and spaces
+// itself out around enlarged cards, the way the rest of the chart already
+// lays out. magnifyScale holds each node's current size multiplier;
+// baseNodePositions is the screen position of every card at scale 1,
+// captured after each "real" (non-hover) render and used as the stable
+// distance reference for the whole hover gesture - if we measured against
+// live (already-magnified) positions instead, the effect would feed back on
+// itself and drift.
+
+let magnifyScale = new Map();
+let baseNodePositions = new Map();
+const MAGNIFY_RADIUS = 260;
+const MAGNIFY_SIGMA = MAGNIFY_RADIUS / 2.2;
+const MAX_BOOST_CAP = 9; // generous ceiling for extreme zoom-out (avoids runaway scale)
+const HOVER_RENDER_THROTTLE_MS = 110;
+let lastHoverRenderAt = 0;
+
+function magnifyFactor(id) {
+  return magnifyScale.get(id) || 1;
+}
+
+function currentZoomScale() {
+  try {
+    return chart.getChartState().lastTransform.k || 1;
+  } catch (e) {
+    return 1;
+  }
+}
+
 // ---------- Chart rendering ----------
 
 function nodeContent(d) {
   const data = d.data;
+  const scale = magnifyFactor(data.id);
 
   if (data.status === 'vacant') {
     return `
-      <div class="org-card" data-node-id="${data.id}" style="width:100%; height:100%; border:3px solid #d33; border-radius:8px; background:#fdeaea; padding:8px 10px; font-family:inherit;">
-        <div class="node-card-title" style="color:#a00;">VACANT</div>
-        <div class="node-card-sub">previously: ${data.departed_name || 'Unknown'}</div>
-        <div class="node-card-sub">${data.location || ''}</div>
+      <div class="org-card" data-node-id="${data.id}" style="width:100%; height:100%; border:3px solid #d33; border-radius:8px; background:#fdeaea; padding:${10 * scale}px ${12 * scale}px; font-family:inherit;">
+        <div class="card-name" style="font-size:${16 * scale}px; color:#a00;">VACANT</div>
+        <div class="card-title" style="font-size:${11 * scale}px;">previously: ${data.departed_name || 'Unknown'}</div>
+        <div class="card-location" style="font-size:${10 * scale}px;">${data.location || ''}</div>
       </div>
     `;
   }
@@ -182,12 +215,12 @@ function nodeContent(d) {
       : '';
 
   return `
-    <div class="org-card" data-node-id="${data.id}" style="position:relative; width:100%; height:100%; border:2px solid ${color}; border-radius:8px; background:#fff; padding:8px 10px; font-family:inherit; opacity:${opacity}; filter:${filterCss};">
+    <div class="org-card" data-node-id="${data.id}" style="position:relative; width:100%; height:100%; border:2px solid ${color}; border-radius:8px; background:#fff; padding:${10 * scale}px ${12 * scale}px ${(data.seller ? 22 : 10) * scale}px ${12 * scale}px; font-family:inherit; opacity:${opacity}; filter:${filterCss};">
       ${badge}
-      <div class="node-card-title">${data.name}</div>
-      <div class="node-card-sub">${data.title || ''}</div>
-      <div class="node-card-sub">${data.location || ''}</div>
-      ${data.seller ? `<div class="node-card-sub" style="color:${color}; font-weight:600;">${data.seller}</div>` : ''}
+      <div class="card-name" style="font-size:${17 * scale}px;">${data.name}</div>
+      <div class="card-title" style="font-size:${11.5 * scale}px;">${data.title || ''}</div>
+      <div class="card-location" style="font-size:${10 * scale}px;">${data.location || ''}</div>
+      ${data.seller ? `<div class="card-seller" style="font-size:${11 * scale}px; right:${10 * scale}px; bottom:${6 * scale}px; color:${color};">${data.seller}</div>` : ''}
     </div>
   `;
 }
@@ -217,6 +250,7 @@ function smoothDiagonal(s, t, _m, offsets = {}) {
 }
 
 function renderChart(data) {
+  magnifyScale = new Map();
   const container = document.getElementById('chart');
   container.innerHTML = '';
 
@@ -229,12 +263,13 @@ function renderChart(data) {
     .data(data)
     .nodeId((d) => d.id)
     .parentNodeId((d) => d.manager_id)
-    .nodeWidth(() => 240)
-    .nodeHeight(() => 110)
-    .childrenMargin(() => 50)
+    .nodeWidth((d) => 240 * magnifyFactor(d.data.id))
+    .nodeHeight((d) => 122 * magnifyFactor(d.data.id))
+    .childrenMargin((d) => 50 * magnifyFactor(d.data.id))
     .compactMarginBetween(() => 25)
     .compactMarginPair(() => 60)
-    .neighbourMargin(() => 30)
+    .neighbourMargin((a, b) => 30 * Math.max(magnifyFactor(a.data.id), magnifyFactor(b.data.id)))
+    .duration(220)
     .linkYOffset(0) // default 30px Safari fudge-factor was leaving a visible gap above every card
     .buttonContent(() => '') // hide the built-in expand/collapse chevron+count badge
     .nodeContent(nodeContent)
@@ -266,130 +301,74 @@ function renderChart(data) {
   scheduleRectRefresh();
 }
 
-// ---------- Hover-magnify effect ----------
-//
-// The card under the cursor should read as large as it would in an isolated
-// few-card view, regardless of how zoomed-out the full org currently is - so
-// the boost amount is derived from the chart's current zoom scale (1/k - 1
-// roughly cancels out the zoom-out), not a fixed constant. Falloff away from
-// the cursor follows a Gaussian bell curve (not linear) so it reads as a
-// smooth lens rather than a hard-edged circle.
-
-let nodeRects = [];
-let mouseMoveRafPending = false;
-const MAGNIFY_RADIUS = 260;
-const MAGNIFY_SIGMA = MAGNIFY_RADIUS / 2.2;
-const MAX_BOOST_CAP = 9; // generous ceiling for extreme zoom-out (avoids runaway scale)
-
-function currentZoomScale() {
-  try {
-    return chart.getChartState().lastTransform.k || 1;
-  } catch (e) {
-    return 1;
-  }
-}
-
-function refreshNodeRects() {
+function captureBasePositions() {
   const cards = document.querySelectorAll('#chart .org-card');
-  nodeRects = Array.from(cards).map((el) => {
+  baseNodePositions = new Map();
+  cards.forEach((el) => {
     const rect = el.getBoundingClientRect();
-    return { el, id: Number(el.dataset.nodeId), cx: rect.left + rect.width / 2, cy: rect.top + rect.height / 2, rect };
+    baseNodePositions.set(Number(el.dataset.nodeId), { cx: rect.left + rect.width / 2, cy: rect.top + rect.height / 2 });
   });
-  updateVpBackdrops();
+  updateVpBackdropsFromDom();
 }
 
 function scheduleRectRefresh() {
-  // d3-org-chart animates layout changes (~400ms transition) - wait for it to
-  // settle before caching screen positions, or the magnify radius would be stale.
-  setTimeout(refreshNodeRects, 450);
+  // d3-org-chart animates layout changes - wait for it to settle before
+  // caching screen positions, or the magnify distance reference would be stale.
+  setTimeout(captureBasePositions, 280);
 }
 
-// Groups cards into visual rows by Y center (siblings share a row) so the
-// overlap-avoidance reflow below only ever shifts cards horizontally within
-// their own row, never across parent/child levels.
-function groupIntoRows(nodes) {
-  const sorted = [...nodes].sort((a, b) => a.cy - b.cy);
-  const rows = [];
-  let row = [];
-  let rowY = null;
-  for (const n of sorted) {
-    if (rowY === null || Math.abs(n.cy - rowY) < 20) {
-      row.push(n);
-      rowY = row.reduce((sum, x) => sum + x.cy, 0) / row.length;
-    } else {
-      rows.push(row);
-      row = [n];
-      rowY = n.cy;
-    }
+// Recomputes each node's magnify factor from its distance (at the stable,
+// unmagnified base layout) to the cursor, then does a REAL re-render so
+// nodeWidth/nodeHeight/margins above actually push the tree apart - this is
+// what makes enlarged cards never overlap their neighbors.
+function applyMagnifyAtCursor(clientX, clientY) {
+  if (!chart || baseNodePositions.size === 0) return;
+  const k = currentZoomScale();
+  const boost = Math.max(0, Math.min(1 / k - 1, MAX_BOOST_CAP));
+
+  const newScale = new Map();
+  for (const [id, pos] of baseNodePositions) {
+    const dx = clientX - pos.cx;
+    const dy = clientY - pos.cy;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    if (dist >= MAGNIFY_RADIUS) continue;
+    const bell = Math.exp(-(dist * dist) / (2 * MAGNIFY_SIGMA * MAGNIFY_SIGMA));
+    const factor = 1 + boost * bell;
+    if (factor > 1.02) newScale.set(id, factor);
   }
-  if (row.length) rows.push(row);
-  return rows;
-}
 
-// Growing a card via scale() alone makes it overlap its neighbors. This
-// spreads same-row siblings apart from the cursor's X position - like a
-// fisheye dock - so enlarged cards always have room, growing the gap instead
-// of overlapping it. Nodes are only ever pushed away from their base
-// position, anchored at whichever card in each direction is closest to the
-// cursor, so the spreading cascades outward symmetrically.
-function reflowRow(row, cursorX) {
-  const gap = 14;
-  const rightGroup = row.filter((n) => n.cx > cursorX).sort((a, b) => a.cx - b.cx);
-  const leftGroup = row.filter((n) => n.cx <= cursorX).sort((a, b) => b.cx - a.cx);
-
-  rightGroup.forEach((n, i) => {
-    if (i === 0) { n.offsetX = 0; return; }
-    const prev = rightGroup[i - 1];
-    const minCx = (prev.cx + prev.offsetX) + prev.halfWidth + gap + n.halfWidth;
-    n.offsetX = Math.max(0, minCx - n.cx);
-  });
-  leftGroup.forEach((n, i) => {
-    if (i === 0) { n.offsetX = 0; return; }
-    const prev = leftGroup[i - 1];
-    const maxCx = (prev.cx + prev.offsetX) - prev.halfWidth - gap - n.halfWidth;
-    n.offsetX = Math.min(0, maxCx - n.cx);
-  });
+  magnifyScale = newScale;
+  chart.render();
+  updateVpBackdropsFromDom();
 }
 
 function handleChartMouseMove(e) {
-  if (mouseMoveRafPending) return;
-  mouseMoveRafPending = true;
-  requestAnimationFrame(() => {
-    mouseMoveRafPending = false;
-    const k = currentZoomScale();
-    const boost = Math.max(0, Math.min(1 / k - 1, MAX_BOOST_CAP));
+  const now = performance.now();
+  if (now - lastHoverRenderAt < HOVER_RENDER_THROTTLE_MS) return;
+  lastHoverRenderAt = now;
+  applyMagnifyAtCursor(e.clientX, e.clientY);
+}
 
-    for (const node of nodeRects) {
-      const dx = e.clientX - node.cx;
-      const dy = e.clientY - node.cy;
-      const dist = Math.sqrt(dx * dx + dy * dy);
-      const bell = dist < MAGNIFY_RADIUS
-        ? Math.exp(-(dist * dist) / (2 * MAGNIFY_SIGMA * MAGNIFY_SIGMA))
-        : 0;
-      node.scale = 1 + boost * bell;
-      node.halfWidth = (node.rect.width / 2) * node.scale;
-      node.offsetX = 0;
-    }
-
-    for (const row of groupIntoRows(nodeRects)) {
-      reflowRow(row, e.clientX);
-    }
-
-    for (const node of nodeRects) {
-      node.el.style.transform = `translateX(${node.offsetX}px) scale(${node.scale})`;
-      node.el.style.zIndex = node.scale > 1.01 ? '10' : '';
-    }
-  });
+function handleChartMouseLeave() {
+  if (magnifyScale.size === 0) return;
+  magnifyScale = new Map();
+  chart.render();
+  updateVpBackdropsFromDom();
 }
 
 // ---------- VP group backdrops ----------
 
-function updateVpBackdrops() {
+function updateVpBackdropsFromDom() {
   const layer = document.getElementById('vpBackdropLayer');
   if (!layer) return;
   layer.innerHTML = '';
 
-  const visibleVps = nodeRects.filter((n) => {
+  const cards = Array.from(document.querySelectorAll('#chart .org-card')).map((el) => ({
+    id: Number(el.dataset.nodeId),
+    rect: el.getBoundingClientRect(),
+  }));
+
+  const visibleVps = cards.filter((n) => {
     const d = flatData.find((fd) => fd.id === n.id);
     return d && d.level === 'VP';
   });
@@ -406,13 +385,13 @@ function updateVpBackdrops() {
     };
     collect(vpNode.id);
 
-    const groupRects = nodeRects.filter((n) => descendantIds.has(n.id));
-    if (!groupRects.length) return;
+    const groupCards = cards.filter((n) => descendantIds.has(n.id));
+    if (!groupCards.length) return;
 
-    const minX = Math.min(...groupRects.map((n) => n.rect.left)) - containerRect.left - padding;
-    const maxX = Math.max(...groupRects.map((n) => n.rect.right)) - containerRect.left + padding;
-    const minY = Math.min(...groupRects.map((n) => n.rect.top)) - containerRect.top - padding;
-    const maxY = Math.max(...groupRects.map((n) => n.rect.bottom)) - containerRect.top + padding;
+    const minX = Math.min(...groupCards.map((n) => n.rect.left)) - containerRect.left - padding;
+    const maxX = Math.max(...groupCards.map((n) => n.rect.right)) - containerRect.left + padding;
+    const minY = Math.min(...groupCards.map((n) => n.rect.top)) - containerRect.top - padding;
+    const maxY = Math.max(...groupCards.map((n) => n.rect.bottom)) - containerRect.top + padding;
 
     const backdrop = document.createElement('div');
     backdrop.className = 'vp-backdrop';
@@ -431,6 +410,7 @@ function applyDepthLimit() {
   const viewRootId = currentIsolatedId != null ? currentIsolatedId : trueRootId();
   if (viewRootId == null) return;
 
+  magnifyScale = new Map(); // any in-progress hover-magnify is stale once navigation changes the view
   chart.collapseAll();
 
   // d3-org-chart's _expanded flag reveals the FLAGGED node itself, by
@@ -564,7 +544,10 @@ function notesSectionHtml(data) {
   const notes = JSON.parse(data.notes_json || '[]');
   const items = notes.map((n, i) => `
     <div class="note-item">
-      <button type="button" class="note-toggle" data-idx="${i}">${new Date(n.created_at).toLocaleString()}</button>
+      <button type="button" class="note-toggle" data-idx="${i}">
+        <span class="note-toggle-title">${escapeHtml(n.title) || 'Note'}</span>
+        <span class="note-toggle-time">${new Date(n.created_at).toLocaleString()}</span>
+      </button>
       <div class="note-body hidden" data-idx="${i}">${escapeHtml(n.text)}</div>
     </div>
   `).join('');
@@ -577,6 +560,7 @@ function notesSectionHtml(data) {
         <button type="button" id="notesCloseAll">Close all</button>
       </div>
       <div id="notesList" class="notes-list">${items || '<p class="note-empty">No notes yet.</p>'}</div>
+      <input id="newNoteTitle" type="text" placeholder="Note title..." />
       <textarea id="newNoteText" placeholder="Add a note..."></textarea>
       <div class="modal-actions"><button type="button" id="saveNoteBtn">Save Note</button></div>
     </div>
@@ -600,13 +584,13 @@ function wireNotesSection(data) {
     document.querySelectorAll('#notesList .note-body').forEach((b) => b.classList.add('hidden'));
   });
   document.getElementById('saveNoteBtn').addEventListener('click', async () => {
-    const textarea = document.getElementById('newNoteText');
-    const text = textarea.value.trim();
+    const text = document.getElementById('newNoteText').value.trim();
     if (!text) return;
+    const title = document.getElementById('newNoteTitle').value.trim();
     const res = await editFetch(`/api/orgs/${currentOrgId}/employees/${data.id}/notes`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text }),
+      body: JSON.stringify({ title, text }),
     });
     if (res) {
       await loadOrgData(currentOrgId);
@@ -797,6 +781,7 @@ function handleArrowKeyPan(e) {
 // ---------- Sort ----------
 
 function applySort(mode) {
+  magnifyScale = new Map();
   if (mode === 'none') {
     chart.data(currentIsolatedId != null ? chart.data() : originalOrder).render();
   } else {
@@ -914,6 +899,7 @@ async function init() {
   await loadOrgSwitcher();
 
   document.getElementById('chart').addEventListener('mousemove', handleChartMouseMove);
+  document.getElementById('chart').addEventListener('mouseleave', handleChartMouseLeave);
   window.addEventListener('resize', () => scheduleRectRefresh());
   document.addEventListener('keydown', handleArrowKeyPan);
 
