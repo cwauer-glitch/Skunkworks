@@ -1418,18 +1418,29 @@ function focusOnPerson(name) {
 // view on every save reads as the chart "jumping" out from under them.
 // preserveView restores the same isolated id (and its same ancestor-to-
 // descendants framing) after the reload, when that id still exists.
+// Returns false (and leaves the previously-rendered chart alone) if orgId
+// doesn't actually exist - e.g. a stale id left over in localStorage from
+// before the database was reset. Without this check, the 404 error body
+// itself ({error: "..."}) would get flattened into a single fake "node"
+// with no real name/id, rendering as one card whose every field shows
+// "undefined" - which is exactly what a stale cached org id looks like.
 async function loadOrgData(orgId, { preserveView = false } = {}) {
   const isolatedIdToRestore = preserveView && currentOrgId === orgId ? currentIsolatedId : null;
 
-  currentOrgId = orgId;
-  currentIsolatedId = null;
-  greyedSiblingIds = new Set();
   const [treeRes, metaRes] = await Promise.all([
     fetch(`/api/orgs/${orgId}/tree`),
     fetch(`/api/orgs/${orgId}/meta`),
   ]);
+  if (!treeRes.ok || !metaRes.ok) {
+    console.error(`Failed to load organization ${orgId}: tree=${treeRes.status} meta=${metaRes.status}`);
+    return false;
+  }
   const tree = await treeRes.json();
   const meta = await metaRes.json();
+
+  currentOrgId = orgId;
+  currentIsolatedId = null;
+  greyedSiblingIds = new Set();
 
   sellerColorMap = new Map();
   flatData = flatten(tree, []);
@@ -1452,6 +1463,7 @@ async function loadOrgData(orgId, { preserveView = false } = {}) {
     .filter((p) => p.status === 'active')
     .map((p) => `<option value="${p.name}">${p.title || ''}</option>`)
     .join('');
+  return true;
 }
 
 async function loadOrgSwitcher(selectOrgId) {
@@ -1459,11 +1471,25 @@ async function loadOrgSwitcher(selectOrgId) {
   const orgs = await res.json();
   const switcher = document.getElementById('orgSwitcher');
   switcher.innerHTML = orgs.map((o) => `<option value="${o.id}">${o.name}</option>`).join('');
-  const target = selectOrgId || Number(localStorage.getItem('skunkworks_org_id')) || orgs[0]?.id;
+
+  // A cached org id (from localStorage, or the URL) can outlive the
+  // organization it pointed to - e.g. after the database is reset on
+  // deploy. Only trust it if it's still in the list the server just gave
+  // us; otherwise fall back to the first real org rather than asking
+  // loadOrgData to render something that no longer exists.
+  const cachedId = Number(localStorage.getItem('skunkworks_org_id'));
+  const requestedId = selectOrgId || cachedId;
+  const requestedIsValid = orgs.some((o) => o.id === requestedId);
+  const target = (requestedIsValid ? requestedId : orgs[0]?.id);
   if (target) {
     switcher.value = String(target);
     localStorage.setItem('skunkworks_org_id', String(target));
-    await loadOrgData(target);
+    const ok = await loadOrgData(target);
+    if (!ok && orgs[0] && orgs[0].id !== target) {
+      switcher.value = String(orgs[0].id);
+      localStorage.setItem('skunkworks_org_id', String(orgs[0].id));
+      await loadOrgData(orgs[0].id);
+    }
   }
 }
 
