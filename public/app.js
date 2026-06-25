@@ -15,7 +15,7 @@ let depthSliderValue = 2;
 let greyedSiblingIds = new Set();
 let showVpLabels = true;
 
-const VP_PASTELS = ['#fde2e2', '#e2f0fd', '#e2fde6', '#fdf6e2', '#f0e2fd', '#e2fdfa', '#fde2f6', '#eaf5d8'];
+const VP_PASTELS = ['#e3ecdd', '#d9e8d2', '#eef0d8', '#dde8e0', '#e6ecdc', '#d6e3da', '#e9eed7', '#dfe9d9'];
 
 function escapeHtml(str) {
   const div = document.createElement('div');
@@ -283,7 +283,7 @@ function renderChart(data) {
     .parentNodeId((d) => d.manager_id)
     .nodeWidth(() => 260)
     .nodeHeight(() => 140)
-    .childrenMargin(() => 50)
+    .childrenMargin(() => 70) // extra breathing room between levels, partly so VP bubble labels have somewhere to sit
     .compactMarginBetween(() => 25)
     .compactMarginPair(() => 60)
     .neighbourMargin(() => 30)
@@ -294,7 +294,7 @@ function renderChart(data) {
     .onZoom(() => updateVpBackdropsFromDom()) // immediate, not debounced - pan/zoom doesn't animate card layout, so positions are already accurate
     .linkUpdate(function (d) {
       d3.select(this)
-        .attr('stroke', d.data._upToTheRootHighlighted ? '#E27396' : '#1a3a6b')
+        .attr('stroke', d.data._upToTheRootHighlighted ? '#E27396' : '#2e3d33')
         .attr('stroke-width', d.data._upToTheRootHighlighted ? 4 : 2)
         .attr('fill', 'none');
       if (d.data._upToTheRootHighlighted) d3.select(this).raise();
@@ -330,9 +330,12 @@ function renderChart(data) {
 }
 
 function scheduleRectRefresh() {
-  // d3-org-chart animates layout changes - wait for it to settle before
-  // measuring screen positions for the VP backdrops below.
-  setTimeout(updateVpBackdropsFromDom, 280);
+  // d3-org-chart's default transition is 400ms - this must wait longer than
+  // that, or it snapshots mid-animation card positions and the backdrops
+  // visibly snap into their correct place a moment after the cards finish,
+  // reading as a stutter. No explicit .duration() is set on the chart, so
+  // this must stay safely above the library's 400ms default.
+  setTimeout(updateVpBackdropsFromDom, 480);
 }
 
 // ---------- VP group backdrops ----------
@@ -398,9 +401,9 @@ function updateVpBackdropsFromDom() {
     };
   }).filter(Boolean);
 
-  const labelHeight = 16;
-  const topLeftMinRoom = labelHeight + 6; // vertical space needed above the VP's own card to fit the label without touching it
-  const minGapToManager = 4; // tighter than the bubble-to-bubble gap - here we just need to clear the card, not leave a generous margin
+  const labelHeight = 18; // sized for the larger top-left "block lettering" font (14px)
+  const topLeftMinRoom = labelHeight + 4; // vertical space needed above the VP's own card to fit the label without touching it
+  const minGapToManager = 2; // tighter than the bubble-to-bubble gap - here we just need to clear the card, not leave a generous margin
 
   // Bubbles only ever overlap horizontally (VPs sit side by side at the same
   // level) - cap each side's padding at half the gap to its nearest
@@ -445,22 +448,39 @@ function updateVpBackdropsFromDom() {
     const text = vp ? deriveFunctionLabel(vp.title) : '';
     const labelColor = darkenColor(color, 0.42);
 
-    // If there's enough room above the VP's own card to fit the label
-    // without ever touching it, it reads better pinned to the bubble's own
-    // top-left, staying visible as you scroll - the entire strip between
-    // the bubble top and the topmost card is guaranteed card-free, so this
-    // can never overlap anything regardless of horizontal position.
-    if (g.rawMinY - minY >= topLeftMinRoom) {
+    // If there's enough vertical room above the VP's own card to fit even a
+    // single line, it reads better pinned to the bubble's own top-left
+    // (large block lettering, since that space affords it), staying visible
+    // as you scroll - the strip between the bubble top and the topmost card
+    // is guaranteed card-free, so this can never overlap anything regardless
+    // of horizontal position. Single-line keeps the height predictable;
+    // width that doesn't fit falls back to ellipsis rather than rejecting
+    // the whole placement, so most labels still land top-left.
+    const availableRoom = g.rawMinY - minY;
+    let placedTopLeft = false;
+    if (availableRoom >= topLeftMinRoom) {
       const label = document.createElement('div');
-      label.className = 'vp-backdrop-label';
+      label.className = 'vp-backdrop-label vp-backdrop-label-large';
       label.textContent = text;
       label.style.color = labelColor;
-      label.style.fontSize = `${labelHeight - 4}px`;
+      label.style.maxWidth = `${Math.max(60, maxX - minX - 16)}px`;
+      let fontPx = 14;
+      label.style.fontSize = `${fontPx}px`;
       layer.appendChild(label);
-      const labelWidth = label.getBoundingClientRect().width;
-      label.style.left = `${Math.min(Math.max(minX, 0) + 8, maxX - labelWidth - 8)}px`;
-      label.style.top = `${Math.min(Math.max(minY, 0) + 6, g.rawMinY - labelHeight - 4)}px`;
-    } else {
+      while (label.getBoundingClientRect().height > availableRoom - 4 && fontPx > 9) {
+        fontPx -= 1;
+        label.style.fontSize = `${fontPx}px`;
+      }
+      const labelRect = label.getBoundingClientRect();
+      if (labelRect.height <= availableRoom - 4) {
+        label.style.left = `${Math.min(Math.max(minX, 0) + 8, maxX - labelRect.width - 8)}px`;
+        label.style.top = `${Math.min(Math.max(minY, 0) + 6, g.rawMinY - labelRect.height - 4)}px`;
+        placedTopLeft = true;
+      } else {
+        label.remove();
+      }
+    }
+    if (!placedTopLeft) {
       belowSpecs.push({ centerX: (minX + maxX) / 2, bubbleBottom: maxY, color: labelColor, text });
     }
   });
@@ -900,9 +920,13 @@ function showDetail(data) {
     <p id="editError" class="modal-error"></p>
     <div class="modal-actions">
       <button id="saveDetailBtn">Save changes</button>
-      <button id="markDepartedBtn" class="danger">Mark as Departed</button>
     </div>
     ${notesSectionHtml(data)}
+    <div class="detail-section">
+      <div class="modal-actions">
+        <button id="markDepartedBtn" class="danger">Mark as Departed</button>
+      </div>
+    </div>
   `;
 
   wireNotesSection(data);
@@ -1154,6 +1178,10 @@ async function init() {
   document.getElementById('clearDrilldownBtn').addEventListener('click', () => {
     showFullOrg();
     buildClientOrgDrilldown();
+    document.getElementById('sortBy').value = 'none';
+    document.getElementById('prioritySortOptions').style.display = 'none';
+    document.getElementById('priorityWatchChk').checked = false;
+    document.getElementById('priorityHighChk').checked = false;
   });
 
   function applyPriorityFilterFromCheckboxes() {
@@ -1186,6 +1214,32 @@ async function init() {
 
   document.getElementById('closeDetail').addEventListener('click', () => {
     document.getElementById('detailPanel').classList.remove('open');
+  });
+
+  // Drag the panel's left edge to widen it - only ever grows from its
+  // current width (dragging right just snaps back to the floor), never
+  // narrower than the original default.
+  const MIN_DETAIL_PANEL_WIDTH = 340;
+  let panelDragStartX = null;
+  let panelDragStartWidth = MIN_DETAIL_PANEL_WIDTH;
+  document.getElementById('detailResizeHandle').addEventListener('mousedown', (e) => {
+    e.preventDefault();
+    panelDragStartX = e.clientX;
+    const current = parseFloat(getComputedStyle(document.getElementById('detailPanel')).width);
+    panelDragStartWidth = current || MIN_DETAIL_PANEL_WIDTH;
+    document.getElementById('detailPanel').classList.add('resizing');
+    document.body.style.cursor = 'ew-resize';
+  });
+  document.addEventListener('mousemove', (e) => {
+    if (panelDragStartX == null) return;
+    const newWidth = Math.max(MIN_DETAIL_PANEL_WIDTH, panelDragStartWidth + (panelDragStartX - e.clientX));
+    document.documentElement.style.setProperty('--detail-panel-width', `${newWidth}px`);
+  });
+  document.addEventListener('mouseup', () => {
+    if (panelDragStartX == null) return;
+    panelDragStartX = null;
+    document.getElementById('detailPanel').classList.remove('resizing');
+    document.body.style.cursor = '';
   });
 
   document.getElementById('priorityFilter').addEventListener('change', (e) => {

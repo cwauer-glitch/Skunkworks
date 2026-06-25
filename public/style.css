@@ -1,3 +1,13 @@
+:root {
+  /* Everforth / Apex Systems palette */
+  --brand-charcoal: #1b1f1a;
+  --brand-forest: #24402d;
+  --brand-forest-hover: #1a3022;
+  --brand-moss: #3c5440;
+  --brand-pine-shadow: #2e3d33;
+  --brand-lemon: #d7ff3f;
+}
+
 * {
   box-sizing: border-box;
 }
@@ -9,13 +19,46 @@ body {
   color: #1a1a1a;
 }
 
+input[type="checkbox"], input[type="range"] {
+  accent-color: var(--brand-forest);
+}
+
+#brandLogo {
+  position: fixed;
+  top: 14px;
+  right: 18px;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+#brandLogo .brand-text {
+  text-align: right;
+  line-height: 1.1;
+}
+
+#brandLogo .brand-name {
+  font-weight: 800;
+  font-size: 13px;
+  letter-spacing: 0.06em;
+  color: var(--brand-charcoal);
+}
+
+#brandLogo .brand-sub {
+  font-weight: 600;
+  font-size: 9px;
+  letter-spacing: 0.08em;
+  color: var(--brand-moss);
+}
+
 #sidebar {
   position: fixed;
   top: 0;
   left: 0;
   width: 280px;
   height: 100%;
-  background: #1f2430;
+  background: var(--brand-charcoal);
   color: #fff;
   padding: 16px;
   overflow-y: auto;
@@ -126,14 +169,14 @@ body {
 }
 
 #sidebar button {
-  background: #3a7bd5;
+  background: var(--brand-forest);
   color: #fff;
   border: none;
   cursor: pointer;
 }
 
 #sidebar button:hover {
-  background: #2f63ad;
+  background: var(--brand-forest-hover);
 }
 
 #sidebar button.danger {
@@ -216,30 +259,54 @@ body {
 .vp-backdrop-label {
   position: absolute;
   font-weight: 700;
+  font-size: 12px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
+.vp-backdrop-label-large {
+  line-height: 1.15;
+}
+
 .vp-backdrop-leader {
   position: absolute;
   width: 2px;
-  background: #1a3a6b;
+  background: #2e3d33;
 }
 
 #detailPanel {
   position: fixed;
   top: 0;
   right: 0;
-  width: 340px;
+  width: var(--detail-panel-width, 340px);
   height: 100%;
   background: #fff;
   box-shadow: -2px 0 10px rgba(0,0,0,0.15);
   padding: 20px;
+  overflow-x: hidden;
   overflow-y: auto;
   transform: translateX(100%);
   transition: transform 0.2s ease;
   z-index: 50;
+}
+
+#detailPanel.resizing {
+  transition: none;
+}
+
+#detailResizeHandle {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 6px;
+  height: 100%;
+  cursor: ew-resize;
+  z-index: 51;
+}
+
+#detailResizeHandle:hover {
+  background: rgba(0, 0, 0, 0.08);
 }
 
 #detailPanel.open {
@@ -344,6 +411,8 @@ body {
 .modal .field-row select {
   flex: 1;
   width: auto;
+  min-width: 0;
+  max-width: 100%;
   margin: 0;
 }
 
@@ -419,7 +488,7 @@ body {
   padding: 6px 8px;
   font-size: 12px;
   white-space: pre-wrap;
-  border-left: 2px solid #3a7bd5;
+  border-left: 2px solid var(--brand-moss);
   margin: 2px 0 6px 4px;
 }
 
@@ -460,8 +529,12 @@ body {
   border-radius: 6px;
   border: none;
   cursor: pointer;
-  background: #3a7bd5;
+  background: var(--brand-forest);
   color: #fff;
+}
+
+.modal-actions button:hover {
+  background: var(--brand-forest-hover);
 }
 
 .modal-actions button.danger {
@@ -561,7 +634,7 @@ body {
 }
 
 .version-item.selected {
-  background: #dbe9fb;
+  background: #e1ead9;
 }
 
 .version-preview {

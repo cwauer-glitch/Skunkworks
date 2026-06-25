@@ -10,6 +10,18 @@
 <script src="https://cdn.jsdelivr.net/npm/d3-org-chart@3"></script>
 </head>
 <body>
+  <div id="brandLogo">
+    <svg width="26" height="26" viewBox="0 0 28 28" aria-hidden="true">
+      <polygon points="14,2 26,24 2,24" fill="#24402d"/>
+      <polygon points="14,11 20.5,24 7.5,24" fill="#1b1f1a"/>
+      <polygon points="14,2 17.5,9.5 10.5,9.5" fill="#d7ff3f"/>
+    </svg>
+    <div class="brand-text">
+      <div class="brand-name">EVERFORTH</div>
+      <div class="brand-sub">APEX SYSTEMS</div>
+    </div>
+  </div>
+
   <aside id="sidebar">
     <div class="sidebar-head">
       <h1>Skunkworks</h1>
@@ -94,6 +106,7 @@
   <main id="chart"></main>
 
   <div id="detailPanel" class="hidden">
+    <div id="detailResizeHandle"></div>
     <button id="closeDetail">&times;</button>
     <div id="detailContent"></div>
   </div>
