@@ -15,7 +15,12 @@ let depthSliderValue = 2;
 let greyedSiblingIds = new Set();
 let showVpLabels = true;
 
-const VP_PASTELS = ['#e3ecdd', '#d9e8d2', '#eef0d8', '#dde8e0', '#e6ecdc', '#d6e3da', '#e9eed7', '#dfe9d9'];
+// Adjacent entries need to read as clearly different colors (not just shade
+// variations of the same green), since adjacent bubbles are exactly the
+// case where confusing two colors matters most - so these cycle through
+// distinct hue families (sage, clay, slate, olive, mauve, moss, sand, teal)
+// while staying muted/earthy in saturation.
+const VP_PASTELS = ['#d8e6d0', '#ecd9c4', '#d4e0e6', '#ece0b8', '#e8d4dc', '#c8dcc4', '#ecdcc0', '#c8e0dc'];
 
 function escapeHtml(str) {
   const div = document.createElement('div');
@@ -198,6 +203,62 @@ function buildClientOrgDrilldown() {
 
 // ---------- Chart rendering ----------
 
+function parseCustomFields(data) {
+  let fields = [];
+  try {
+    fields = JSON.parse(data.custom_fields_json || '[]');
+  } catch (e) {
+    fields = [];
+  }
+  const padded = [];
+  for (let i = 0; i < 5; i++) padded.push(fields[i] || { title: '', note: '' });
+  return padded;
+}
+
+// d3-org-chart calls nodeHeight() before the card's HTML is in the DOM, so
+// there's nothing to measure live - instead measure into a hidden offscreen
+// div with the same width/font the real card uses, to estimate how many
+// lines a wrapped title and the populated custom fields will actually take.
+let measureDiv = null;
+function measureWrappedHeight(text, fontSizePx, fontWeight) {
+  if (!text) return 0;
+  if (!measureDiv) {
+    measureDiv = document.createElement('div');
+    measureDiv.style.position = 'absolute';
+    measureDiv.style.visibility = 'hidden';
+    measureDiv.style.left = '-9999px';
+    measureDiv.style.top = '0';
+    measureDiv.style.width = '234px'; // card width (260) minus its horizontal padding
+    measureDiv.style.fontFamily = 'inherit';
+    measureDiv.style.lineHeight = '1.2';
+    measureDiv.style.wordWrap = 'break-word';
+    document.body.appendChild(measureDiv);
+  }
+  measureDiv.style.fontSize = `${fontSizePx}px`;
+  measureDiv.style.fontWeight = fontWeight || 'normal';
+  measureDiv.textContent = text;
+  return measureDiv.getBoundingClientRect().height;
+}
+
+const CARD_BASE_HEIGHT = 140;
+
+// Title wraps instead of truncating, and populated custom fields add their
+// own lines below the location - the card grows to fit both, capped at
+// double its base height so a handful of long fields can't blow up the
+// whole chart's row spacing.
+function computeCardHeight(data) {
+  if (data.status === 'vacant') return CARD_BASE_HEIGHT;
+  const titleHeight = measureWrappedHeight(data.title || '', 15);
+  const oneLineTitleHeight = measureWrappedHeight('x', 15);
+  const titleExtra = Math.max(0, titleHeight - oneLineTitleHeight);
+
+  const fieldsExtra = parseCustomFields(data)
+    .filter((f) => f.title && f.title.trim())
+    .reduce((sum, f) => sum + measureWrappedHeight(`${f.title} : ${f.note || ''}`, 11) + 3, 0);
+
+  return Math.min(CARD_BASE_HEIGHT * 2, CARD_BASE_HEIGHT + titleExtra + fieldsExtra);
+}
+
 function nodeContent(d) {
   const data = d.data;
 
@@ -232,12 +293,20 @@ function nodeContent(d) {
       ? '<span class="priority-badge priority-watch" title="Watching">•</span>'
       : '';
 
+  const populatedFields = parseCustomFields(data).filter((f) => f.title && f.title.trim());
+  const customFieldsHtml = populatedFields.length ? `
+    <div class="card-custom-fields">
+      ${populatedFields.map((f) => `<div class="card-custom-field">${escapeHtml(f.title)} : ${escapeHtml(f.note || '')}</div>`).join('')}
+    </div>
+  ` : '';
+
   return `
-    <div class="org-card" data-node-id="${data.id}" style="position:relative; width:100%; height:100%; border:2px solid ${color}; border-radius:8px; background:#fff; padding:11px 13px ${data.seller ? 26 : 11}px 13px; font-family:inherit; opacity:${opacity}; filter:${filterCss};">
+    <div class="org-card" data-node-id="${data.id}" style="position:relative; width:100%; height:100%; border:2px solid ${color}; border-radius:8px; background:#fff; padding:11px 13px ${data.seller ? 26 : 11}px 13px; font-family:inherit; opacity:${opacity}; filter:${filterCss}; overflow:hidden;">
       ${badge}
       <div class="card-name" style="font-size:22px;">${data.name}</div>
       <div class="card-title" style="font-size:15px;">${data.title || ''}</div>
       <div class="card-location" style="font-size:13px;">${data.location || ''}</div>
+      ${customFieldsHtml}
       ${data.seller ? `<div class="card-seller" style="font-size:14px; right:12px; bottom:7px; color:${color};">${data.seller}</div>` : ''}
     </div>
   `;
@@ -282,7 +351,7 @@ function renderChart(data) {
     .nodeId((d) => d.id)
     .parentNodeId((d) => d.manager_id)
     .nodeWidth(() => 260)
-    .nodeHeight(() => 140)
+    .nodeHeight((d) => computeCardHeight(d.data))
     .childrenMargin(() => 70) // extra breathing room between levels, partly so VP bubble labels have somewhere to sit
     .compactMarginBetween(() => 25)
     .compactMarginPair(() => 60)
@@ -358,6 +427,83 @@ function deriveFunctionLabel(title) {
   return stripped || title;
 }
 
+// True if `ancestorId` is somewhere above `nodeId` in the reporting chain.
+function isAncestor(ancestorId, nodeId) {
+  let cur = flatData.find((d) => d.id === nodeId);
+  while (cur && cur.manager_id != null) {
+    if (cur.manager_id === ancestorId) return true;
+    cur = flatData.find((d) => d.id === cur.manager_id);
+  }
+  return false;
+}
+
+// Which nodes get a bubble, and whether each is the "focal" one (the person
+// actually clicked/isolated - gets the bigger, more prominent label) vs a
+// "peer" (a visible sibling at the same level - gets a smaller label so it
+// can't compete with or overlap the focal one's connector line). Two rules,
+// combined:
+//  1. Any VP-level node with 2+ such peers simultaneously visible (the
+//     original default-view behavior - e.g. an SVP's VP-level children).
+//  2. The currently isolated node, at ANY level, plus its visible
+//     same-manager siblings - this is what makes the bubble follow you
+//     when you drill into a Director/Manager, not just VPs.
+// Rule 2 is skipped for any node that would just nest around a bubble
+// already produced by rule 1 (e.g. isolating an SVP whose VP children are
+// already individually bubbled - re-bubbling the SVP on top would just be a
+// bigger, redundant bubble around the same area).
+function computeBubbleTargets(cards) {
+  const targets = new Map();
+
+  // Greyed ancestor-chain siblings (and their own expanded subtrees) are
+  // rendered for context but are not part of the focal subtree - excluding
+  // them here keeps the VP-level rule scoped to the isolated person's own
+  // organization, so an unrelated branch's VP cards (which can land at
+  // overlapping screen positions purely by coincidence) never get bubbled
+  // alongside it.
+  const inFocalScope = (id) => currentIsolatedId == null || id === currentIsolatedId || isAncestor(currentIsolatedId, id);
+  const vpLevelVisible = cards.filter((n) => inFocalScope(n.id) && flatData.find((d) => d.id === n.id)?.level === 'VP');
+  if (vpLevelVisible.length >= 2) {
+    vpLevelVisible.forEach((n) => targets.set(n.id, false));
+  }
+
+  if (currentIsolatedId != null) {
+    const focal = flatData.find((d) => d.id === currentIsolatedId);
+    if (focal) {
+      if (targets.has(focal.id)) {
+        // Already bubbled by rule 1 (e.g. isolating a VP whose peers are
+        // also VP-level) - just promote it to focal, no need to also pull
+        // in its own siblings (rule 1 already covers that level).
+        targets.set(focal.id, true);
+      } else {
+        // If the focal's own descendants are already individually bubbled
+        // by rule 1 (e.g. isolating an SVP whose VP children each got their
+        // own bubble), the focal itself - and by extension its unrelated
+        // greyed-context siblings at the same level - should get no bubble
+        // of their own; re-bubbling here would either nest redundantly or,
+        // worse, pull in completely unrelated branches' siblings that just
+        // happen to be rendered for ancestor-chain context.
+        const focalNested = Array.from(targets.keys()).some((existingId) => isAncestor(focal.id, existingId));
+        if (!focalNested) {
+          const candidates = [focal, ...flatData.filter((d) => d.manager_id === focal.manager_id && d.id !== focal.id)];
+          candidates.forEach((cand) => {
+            const isFocalNode = cand.id === currentIsolatedId;
+            if (targets.has(cand.id)) {
+              if (isFocalNode) targets.set(cand.id, true);
+              return;
+            }
+            if (!cards.some((n) => n.id === cand.id)) return; // not currently rendered
+            const wouldNest = Array.from(targets.keys()).some((existingId) => isAncestor(cand.id, existingId));
+            if (wouldNest) return;
+            targets.set(cand.id, isFocalNode);
+          });
+        }
+      }
+    }
+  }
+
+  return Array.from(targets.entries()).map(([id, isFocal]) => ({ id, isFocal }));
+}
+
 function updateVpBackdropsFromDom() {
   const layer = document.getElementById('vpBackdropLayer');
   if (!layer) return;
@@ -369,31 +515,29 @@ function updateVpBackdropsFromDom() {
   }));
   const cardsById = new Map(cards.map((c) => [c.id, c]));
 
-  const visibleVps = cards.filter((n) => {
-    const d = flatData.find((fd) => fd.id === n.id);
-    return d && d.level === 'VP';
-  });
-  if (visibleVps.length < 2) return;
+  const bubbleTargets = computeBubbleTargets(cards);
+  if (!bubbleTargets.length) return;
 
   const containerRect = document.getElementById('chart').getBoundingClientRect();
   const desiredPadding = 16;
   const minGap = 10; // always leave at least this much space between two bubbles
 
-  // Raw (unpadded) bounding box per VP's own card + all of its descendants,
+  // Raw (unpadded) bounding box per target's own card + all of its descendants,
   // in #chart-local coordinates.
-  const groups = visibleVps.map((vpNode) => {
+  const groups = bubbleTargets.map(({ id, isFocal }) => {
     const descendantIds = new Set();
     const collect = (pid) => {
       descendantIds.add(pid);
       flatData.filter((d) => d.manager_id === pid).forEach((c) => collect(c.id));
     };
-    collect(vpNode.id);
+    collect(id);
     const groupCards = cards.filter((n) => descendantIds.has(n.id));
     if (!groupCards.length) return null;
-    const vpData = flatData.find((d) => d.id === vpNode.id);
+    const nodeData = flatData.find((d) => d.id === id);
     return {
-      vpId: vpNode.id,
-      managerId: vpData ? vpData.manager_id : null,
+      nodeId: id,
+      isFocal,
+      managerId: nodeData ? nodeData.manager_id : null,
       rawMinX: Math.min(...groupCards.map((n) => n.rect.left)) - containerRect.left,
       rawMaxX: Math.max(...groupCards.map((n) => n.rect.right)) - containerRect.left,
       rawMinY: Math.min(...groupCards.map((n) => n.rect.top)) - containerRect.top,
@@ -401,12 +545,14 @@ function updateVpBackdropsFromDom() {
     };
   }).filter(Boolean);
 
-  const labelHeight = 18; // sized for the larger top-left "block lettering" font (14px)
-  const topLeftMinRoom = labelHeight + 4; // vertical space needed above the VP's own card to fit the label without touching it
+  // Sized for the larger top-left "block lettering" font, generously enough
+  // that the smaller peer-label tier fits comfortably in the same space too.
+  const labelHeight = 20;
+  const topLeftMinRoom = labelHeight + 4;
   const minGapToManager = 2; // tighter than the bubble-to-bubble gap - here we just need to clear the card, not leave a generous margin
 
-  // Bubbles only ever overlap horizontally (VPs sit side by side at the same
-  // level) - cap each side's padding at half the gap to its nearest
+  // Bubbles only ever overlap horizontally (peers sit side by side at the
+  // same level) - cap each side's padding at half the gap to its nearest
   // neighbor, minus a hard minimum gap, so two bubbles can never touch.
   groups.sort((a, b) => a.rawMinX - b.rawMinX);
   groups.forEach((g, i) => {
@@ -418,16 +564,74 @@ function updateVpBackdropsFromDom() {
     g.padRight = Math.min(desiredPadding, rightAvail);
 
     // The top tries to reserve enough room for an in-bubble label by default
-    // (more than the other sides need), but can't cross into the VP's own
+    // (more than the other sides need), but can't cross into this node's own
     // manager's card above - whichever is more restrictive wins.
     const managerCard = g.managerId != null ? cardsById.get(g.managerId) : null;
     const managerBottom = managerCard ? managerCard.rect.bottom - containerRect.top : -Infinity;
     g.minY = Math.max(g.rawMinY - topLeftMinRoom, managerBottom + minGapToManager);
   });
 
+  // The horizontal-neighbor padding above assumes peers sit in a single
+  // left-to-right row, which is true for normal sibling layouts but not for
+  // densely-tiled subtrees (d3-org-chart wraps many leaf-only children into
+  // a multi-row grid to save width) - there, two bubbles can be horizontal
+  // neighbors in name only while actually stacked in different rows. Two
+  // different failure modes need two different fixes:
+  //  - If the RAW (unpadded) card footprints themselves already overlap,
+  //    no amount of padding adjustment can separate them - that's a genuine
+  //    multi-row tiling conflict, so drop whichever of the pair isn't focal.
+  //  - If only the PADDED boxes overlap (raw footprints are fine, just the
+  //    extra margin intrudes - e.g. a small peer's box reaching into a much
+  //    larger focal bubble's territory), shrinking the non-focal one's
+  //    padding back to zero is enough, and keeps the bubble instead of
+  //    losing it entirely.
+  // Neither check applies to a pair involving the focal group: a small
+  // peer's card legitimately sitting inside the focal's much larger
+  // subtree footprint (e.g. an isolated VP's peer rendered alongside their
+  // wide descendant tree) is expected and reads fine - the peer's own
+  // opaque box simply draws on top of that part of the focal's, the same
+  // way it always has. Only peer-vs-peer collisions (true sibling tiling
+  // conflicts) need fixing.
+  for (let i = 0; i < groups.length; i++) {
+    for (let j = i + 1; j < groups.length; j++) {
+      const a = groups[i];
+      const b = groups[j];
+      if (!a || !b || a.isFocal || b.isFocal) continue;
+      const rawOverlaps = a.rawMinX < b.rawMaxX && a.rawMaxX > b.rawMinX && a.rawMinY < b.rawMaxY && a.rawMaxY > b.rawMinY;
+      if (rawOverlaps) groups[j] = null;
+    }
+  }
+  const survivingGroups = groups.filter(Boolean);
+
+  let paddedOverlapsFound = true;
+  let guard = 0;
+  while (paddedOverlapsFound && guard < 5) {
+    paddedOverlapsFound = false;
+    guard += 1;
+    for (let i = 0; i < survivingGroups.length; i++) {
+      for (let j = i + 1; j < survivingGroups.length; j++) {
+        const a = survivingGroups[i];
+        const b = survivingGroups[j];
+        if (a.isFocal || b.isFocal) continue;
+        const aBox = { minX: a.rawMinX - a.padLeft, maxX: a.rawMaxX + a.padRight, minY: a.minY, maxY: a.rawMaxY + desiredPadding };
+        const bBox = { minX: b.rawMinX - b.padLeft, maxX: b.rawMaxX + b.padRight, minY: b.minY, maxY: b.rawMaxY + desiredPadding };
+        const overlaps = aBox.minX < bBox.maxX && aBox.maxX > bBox.minX && aBox.minY < bBox.maxY && aBox.maxY > bBox.minY;
+        if (overlaps) {
+          const shrink = b;
+          if (shrink.padLeft > 0 || shrink.padRight > 0) {
+            shrink.padLeft = 0;
+            shrink.padRight = 0;
+            shrink.minY = shrink.rawMinY;
+            paddedOverlapsFound = true;
+          }
+        }
+      }
+    }
+  }
+
   const belowSpecs = [];
 
-  groups.forEach((g, i) => {
+  survivingGroups.forEach((g, i) => {
     const minX = g.rawMinX - g.padLeft;
     const maxX = g.rawMaxX + g.padRight;
     const minY = g.minY;
@@ -444,30 +648,33 @@ function updateVpBackdropsFromDom() {
     layer.appendChild(backdrop);
 
     if (!showVpLabels) return;
-    const vp = flatData.find((d) => d.id === g.vpId);
-    const text = vp ? deriveFunctionLabel(vp.title) : '';
+    const node = flatData.find((d) => d.id === g.nodeId);
+    const text = node ? deriveFunctionLabel(node.title) : '';
     const labelColor = darkenColor(color, 0.42);
+    const startFontPx = g.isFocal ? 17 : 11;
+    const minFontPx = g.isFocal ? 11 : 8;
 
-    // If there's enough vertical room above the VP's own card to fit even a
+    // If there's enough vertical room above the topmost card to fit even a
     // single line, it reads better pinned to the bubble's own top-left
-    // (large block lettering, since that space affords it), staying visible
-    // as you scroll - the strip between the bubble top and the topmost card
-    // is guaranteed card-free, so this can never overlap anything regardless
-    // of horizontal position. Single-line keeps the height predictable;
-    // width that doesn't fit falls back to ellipsis rather than rejecting
-    // the whole placement, so most labels still land top-left.
+    // (block lettering, sized down for non-focal peers so they can't compete
+    // with or overlap the focal node's own connector line up to its
+    // manager), staying visible as you scroll - the strip between the
+    // bubble top and the topmost card is guaranteed card-free, so this can
+    // never overlap anything regardless of horizontal position. Width that
+    // doesn't fit falls back to ellipsis rather than rejecting the whole
+    // placement, so most labels still land top-left.
     const availableRoom = g.rawMinY - minY;
     let placedTopLeft = false;
     if (availableRoom >= topLeftMinRoom) {
       const label = document.createElement('div');
-      label.className = 'vp-backdrop-label vp-backdrop-label-large';
+      label.className = `vp-backdrop-label ${g.isFocal ? 'vp-backdrop-label-large' : ''}`;
       label.textContent = text;
       label.style.color = labelColor;
       label.style.maxWidth = `${Math.max(60, maxX - minX - 16)}px`;
-      let fontPx = 14;
+      let fontPx = startFontPx;
       label.style.fontSize = `${fontPx}px`;
       layer.appendChild(label);
-      while (label.getBoundingClientRect().height > availableRoom - 4 && fontPx > 9) {
+      while (label.getBoundingClientRect().height > availableRoom - 4 && fontPx > minFontPx) {
         fontPx -= 1;
         label.style.fontSize = `${fontPx}px`;
       }
@@ -481,7 +688,7 @@ function updateVpBackdropsFromDom() {
       }
     }
     if (!placedTopLeft) {
-      belowSpecs.push({ centerX: (minX + maxX) / 2, bubbleBottom: maxY, color: labelColor, text });
+      belowSpecs.push({ centerX: (minX + maxX) / 2, bubbleBottom: maxY, color: labelColor, text, isFocal: g.isFocal });
     }
   });
 
@@ -496,8 +703,6 @@ function updateVpBackdropsFromDom() {
 // the same principle the bubbles themselves use to avoid touching.
 function renderVpLabels(layer, specs) {
   const gap = 8;
-  const minFontPx = 9;
-  const baseFontPx = 12;
 
   specs.sort((a, b) => a.centerX - b.centerX);
 
@@ -506,7 +711,7 @@ function renderVpLabels(layer, specs) {
     label.className = 'vp-backdrop-label';
     label.textContent = spec.text;
     label.style.color = spec.color;
-    label.style.fontSize = `${baseFontPx}px`;
+    label.style.fontSize = `${spec.isFocal ? 13 : 10}px`;
     label.style.visibility = 'hidden';
     layer.appendChild(label);
     return label;
@@ -514,17 +719,30 @@ function renderVpLabels(layer, specs) {
 
   // Measure at base size first, then compute how much each label needs to
   // shrink to fit within the space available to its nearest neighbor.
+  // Bubbles of very different heights (e.g. a small peer card next to a
+  // huge focal subtree) land their below-labels at very different depths -
+  // only treat two labels as squeezing each other if they'd actually land
+  // in roughly the same horizontal band; otherwise a distant, unrelated
+  // label shouldn't force this one to truncate.
+  const sameRowThreshold = 40;
   const widths = els.map((el) => el.getBoundingClientRect().width);
   const avails = specs.map((spec, i) => {
     const leftNeighbor = specs[i - 1];
     const rightNeighbor = specs[i + 1];
-    const leftAvail = leftNeighbor ? (spec.centerX - leftNeighbor.centerX) / 2 - gap / 2 : Infinity;
-    const rightAvail = rightNeighbor ? (rightNeighbor.centerX - spec.centerX) / 2 - gap / 2 : Infinity;
+    const leftIsSameRow = leftNeighbor && Math.abs(leftNeighbor.bubbleBottom - spec.bubbleBottom) < sameRowThreshold;
+    const rightIsSameRow = rightNeighbor && Math.abs(rightNeighbor.bubbleBottom - spec.bubbleBottom) < sameRowThreshold;
+    const leftAvail = leftIsSameRow ? (spec.centerX - leftNeighbor.centerX) / 2 - gap / 2 : Infinity;
+    const rightAvail = rightIsSameRow ? (rightNeighbor.centerX - spec.centerX) / 2 - gap / 2 : Infinity;
     return Math.max(20, Math.min(leftAvail, rightAvail));
   });
-  const scales = specs.map((spec, i) => Math.max(minFontPx / baseFontPx, Math.min(1, avails[i] / (widths[i] / 2))));
+  const scales = specs.map((spec, i) => {
+    const baseFontPx = spec.isFocal ? 13 : 10;
+    const minFontPx = spec.isFocal ? 10 : 8;
+    return Math.max(minFontPx / baseFontPx, Math.min(1, avails[i] / (widths[i] / 2)));
+  });
 
   specs.forEach((spec, i) => {
+    const baseFontPx = spec.isFocal ? 13 : 10;
     const fontPx = Math.round(baseFontPx * scales[i]);
     const label = els[i];
     label.style.fontSize = `${fontPx}px`;
@@ -805,6 +1023,49 @@ function wireNotesSection(data) {
   });
 }
 
+// 5 collapsible Field N rows (Title + Note), shown on the card itself
+// indented below the location whenever a field's title is populated.
+function customFieldsSectionHtml(data) {
+  const fields = parseCustomFields(data);
+  const rows = fields.map((f, i) => `
+    <details class="custom-field-row" ${f.title ? 'open' : ''}>
+      <summary>Field ${i + 1}${f.title ? `: ${escapeHtml(f.title)}` : ''}</summary>
+      <div class="field-row"><label>Title</label><input id="cfTitle${i}" type="text" value="${escapeHtml(f.title)}" /></div>
+      <label>Note <textarea id="cfNote${i}">${escapeHtml(f.note)}</textarea></label>
+    </details>
+  `).join('');
+
+  return `
+    <div class="detail-section">
+      <h4>Custom Fields</h4>
+      ${rows}
+      <p id="customFieldsError" class="modal-error"></p>
+      <div class="modal-actions"><button type="button" id="saveCustomFieldsBtn">Save Custom Fields</button></div>
+    </div>
+  `;
+}
+
+function wireCustomFieldsSection(data) {
+  document.getElementById('saveCustomFieldsBtn').addEventListener('click', async () => {
+    const fields = [0, 1, 2, 3, 4].map((i) => ({
+      title: document.getElementById(`cfTitle${i}`).value.trim(),
+      note: document.getElementById(`cfNote${i}`).value.trim(),
+    }));
+    const res = await editFetch(`/api/orgs/${currentOrgId}/employees/${data.id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ custom_fields_json: JSON.stringify(fields) }),
+    });
+    if (res) {
+      await loadOrgData(currentOrgId);
+      const refreshed = flatData.find((d) => d.id === data.id);
+      if (refreshed) showDetail(refreshed);
+    } else {
+      document.getElementById('customFieldsError').textContent = 'Could not save custom fields.';
+    }
+  });
+}
+
 function showDetail(data) {
   const panel = document.getElementById('detailPanel');
   const content = document.getElementById('detailContent');
@@ -922,6 +1183,7 @@ function showDetail(data) {
       <button id="saveDetailBtn">Save changes</button>
     </div>
     ${notesSectionHtml(data)}
+    ${customFieldsSectionHtml(data)}
     <div class="detail-section">
       <div class="modal-actions">
         <button id="markDepartedBtn" class="danger">Mark as Departed</button>
@@ -930,6 +1192,7 @@ function showDetail(data) {
   `;
 
   wireNotesSection(data);
+  wireCustomFieldsSection(data);
 
   const managerSelect = document.getElementById('edManager');
   managerOptions(managerSelect, data.id);

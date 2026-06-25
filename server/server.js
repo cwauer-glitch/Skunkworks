@@ -42,6 +42,12 @@ const employeeColumns = db.prepare('PRAGMA table_info(employees)').all().map((c)
 if (!employeeColumns.includes('notes_json')) {
   db.exec("ALTER TABLE employees ADD COLUMN notes_json TEXT NOT NULL DEFAULT '[]'");
 }
+// Custom Field 1-5 (each a {title, note} pair) shown on the card itself when
+// populated, editable from the detail panel - same JSON-on-the-row pattern
+// as notes, so it's covered by version history for free.
+if (!employeeColumns.includes('custom_fields_json')) {
+  db.exec("ALTER TABLE employees ADD COLUMN custom_fields_json TEXT NOT NULL DEFAULT '[]'");
+}
 
 // Seed version 1 for any org that doesn't have history yet (first boot after
 // this migration, or an org created before version history existed).
@@ -144,7 +150,7 @@ app.get('/api/orgs/:orgId/versions/:versionId', (req, res) => {
 const EMPLOYEE_COLUMNS = [
   'id', 'org_id', 'name', 'title', 'level', 'division', 'location', 'seller', 'seller_territory',
   'manager_id', 'status', 'departed_name', 'priority_tags', 'priority_goal', 'priority_signal',
-  'notes_json',
+  'notes_json', 'custom_fields_json',
 ];
 
 function insertEmployeeRow(record) {
@@ -172,7 +178,7 @@ app.post('/api/orgs/:orgId/versions/:versionId/restore', requirePasscode, (req, 
 
 const EDITABLE_FIELDS = [
   'name', 'title', 'level', 'division', 'location', 'seller', 'seller_territory',
-  'priority_tags', 'priority_goal', 'priority_signal',
+  'priority_tags', 'priority_goal', 'priority_signal', 'custom_fields_json',
 ];
 
 app.patch('/api/orgs/:orgId/employees/:id', requirePasscode, (req, res) => {
