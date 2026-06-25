@@ -376,8 +376,7 @@ function renderChart(data) {
     .nodeWidth(() => 260)
     .nodeHeight((d) => computeCardHeight(d.data))
     .childrenMargin(() => 70) // extra breathing room between levels, partly so VP bubble labels have somewhere to sit
-    .compactMarginBetween(() => 25)
-    .compactMarginPair(() => 60)
+    .compact(false) // compact mode wraps many leaf-only siblings into a multi-row grid to save width, but that splits one manager's direct reports across two visual rows with very little vertical gap between them - leaving too little room for some (but not all) of their bubble labels to land top-left consistently. A single row per depth keeps every peer's available label room the same.
     .neighbourMargin(() => 30)
     .linkYOffset(0) // default 30px Safari fudge-factor was leaving a visible gap above every card
     .buttonContent(() => '') // hide the built-in expand/collapse chevron+count badge
@@ -615,23 +614,6 @@ function updateVpBackdropsFromDom() {
   const topLeftMinRoom = labelHeight + 4;
   const minGapToManager = 2; // tighter than the bubble-to-bubble gap - here we just need to clear the card, not leave a generous margin
 
-  // The connector curves between a manager and its children fan out
-  // horizontally across most of the gap between them, not just right under
-  // the manager's card - clamping the label's top edge to the manager
-  // card's bottom alone left it sitting right in the middle of that fan,
-  // overlapping the lines. Measuring the actual rendered <path> elements
-  // and clamping below whichever one reaches lowest (within this row's own
-  // horizontal span) accounts for the real curve geometry instead of
-  // assuming it's a straight vertical line.
-  const linkPathRects = Array.from(document.querySelectorAll('#chart svg path')).map((p) => {
-    const r = p.getBoundingClientRect();
-    return {
-      left: r.left - containerRect.left,
-      right: r.right - containerRect.left,
-      top: r.top - containerRect.top,
-      bottom: r.bottom - containerRect.top,
-    };
-  });
 
   const allRows = [];
   groups.forEach((g) => {
@@ -640,20 +622,19 @@ function updateVpBackdropsFromDom() {
       rb.padLeft = desiredPadding;
       rb.padRight = desiredPadding;
       if (ri === 0) {
-        // The top row tries to reserve enough room for the label by default,
-        // but can't cross into this node's own manager's card above, nor any
-        // connector line feeding into it from above - whichever is most
-        // restrictive wins. Capped at the row's own top: a connector line
-        // terminates right at the card's own top edge, so its bottom (plus
-        // the gap buffer) can land at or just past it - without this cap
-        // that pushed the row's top BELOW the card it's supposed to
-        // enclose, leaving its own top sliver uncovered.
+        // The top row reserves a fixed strip for the label, capped only by
+        // this node's own manager's card (a solid rectangle - genuinely
+        // can't be crossed) and never below the row's own top (so the
+        // bubble still fully encloses its own card even when there's no
+        // room left to spare). A connector line always terminates exactly
+        // at its target's own card top, so clamping by the line's bottom
+        // here would always force zero room for every row that has an
+        // incoming line at all - every row, in other words. Avoiding the
+        // line is handled separately, by nudging the label sideways within
+        // this same strip rather than giving up the room entirely.
         const managerCard = g.managerId != null ? cardsById.get(g.managerId) : null;
         const managerBottom = managerCard ? managerCard.rect.bottom - containerRect.top : -Infinity;
-        const feedingLinksBottom = linkPathRects
-          .filter((pr) => pr.right > rb.rawMinX && pr.left < rb.rawMaxX && pr.top < rb.rawMinY)
-          .reduce((max, pr) => Math.max(max, pr.bottom), -Infinity);
-        rb.minY = Math.min(rb.rawMinY, Math.max(rb.rawMinY - topLeftMinRoom, managerBottom + minGapToManager, feedingLinksBottom + minGapToManager));
+        rb.minY = Math.min(rb.rawMinY, Math.max(rb.rawMinY - topLeftMinRoom, managerBottom + minGapToManager));
       } else {
         // Interior rows of the same group share a seam with the row above -
         // touching, not gapped, so the bubble reads as one continuous shape.
@@ -799,7 +780,22 @@ function updateVpBackdropsFromDom() {
       }
       const labelRect = label.getBoundingClientRect();
       if (labelRect.height <= availableRoom - 4) {
-        label.style.left = `${Math.min(Math.max(minX, 0) + 8, maxX - labelRect.width - 8)}px`;
+        // The connector line feeding this row always approaches and
+        // terminates near the row's own card's horizontal center, however
+        // wide the bubble itself is - so anchor the label at whichever
+        // side (left or right of that center) has more room within the
+        // bubble's own width, clear of where the line comes in, rather
+        // than always flush-left. A bubble is typically much wider than
+        // its own anchor card (it spans descendants too), so one side
+        // almost always has plenty of room regardless of which sibling
+        // this is - keeping every peer's label in the same visual format.
+        const cardCenterX = (topRow.rawMinX + topRow.rawMaxX) / 2;
+        const leftRoom = cardCenterX - minX;
+        const rightRoom = maxX - cardCenterX;
+        const left = leftRoom >= rightRoom
+          ? Math.max(minX, 0) + 8
+          : Math.min(maxX - labelRect.width - 8, cardCenterX + 8);
+        label.style.left = `${Math.min(Math.max(left, minX + 4), maxX - labelRect.width - 4)}px`;
         label.style.top = `${Math.min(Math.max(topRow.minY, 0) + 6, topRow.rawMinY - labelRect.height - 4)}px`;
         label.dataset.ownerId = g.nodeId;
         placedTopLeft = true;
