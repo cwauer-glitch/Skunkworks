@@ -7,6 +7,7 @@ let chart;
 let flatData = [];
 let originalOrder = [];
 let nameToId = new Map();
+let flatDataById = new Map(); // mirrors flatData, keyed by id - avoids O(n) .find() in hot paths like isAncestor
 let currentOrgId = null;
 let showOnlyFlagged = false;
 let selectedSellers = new Set();
@@ -242,21 +243,43 @@ function measureWrappedHeight(text, fontSizePx, fontWeight) {
 
 const CARD_BASE_HEIGHT = 140;
 
+// getBoundingClientRect() forces a synchronous layout - fine once, but
+// nodeHeight() runs for every visible node on every render (click, depth
+// change, sort...), and this chart has a documented history of stutter from
+// exactly this kind of per-render layout thrashing. Caching by the only
+// inputs that affect the result (title, custom fields) means a re-render of
+// unchanged data - the common case - never touches the measuring div again.
+const oneLineHeightCache = new Map();
+function getOneLineHeight(fontSizePx) {
+  if (!oneLineHeightCache.has(fontSizePx)) {
+    oneLineHeightCache.set(fontSizePx, measureWrappedHeight('x', fontSizePx));
+  }
+  return oneLineHeightCache.get(fontSizePx);
+}
+
+const cardHeightCache = new Map();
+
 // Title wraps instead of truncating, and populated custom fields add their
 // own lines below the location - the card grows to fit both, capped at
 // double its base height so a handful of long fields can't blow up the
 // whole chart's row spacing.
 function computeCardHeight(data) {
   if (data.status === 'vacant') return CARD_BASE_HEIGHT;
+
+  const cacheKey = `${data.id}|${data.title || ''}|${data.custom_fields_json || ''}`;
+  const cached = cardHeightCache.get(cacheKey);
+  if (cached !== undefined) return cached;
+
   const titleHeight = measureWrappedHeight(data.title || '', 15);
-  const oneLineTitleHeight = measureWrappedHeight('x', 15);
-  const titleExtra = Math.max(0, titleHeight - oneLineTitleHeight);
+  const titleExtra = Math.max(0, titleHeight - getOneLineHeight(15));
 
   const fieldsExtra = parseCustomFields(data)
     .filter((f) => f.title && f.title.trim())
     .reduce((sum, f) => sum + measureWrappedHeight(`${f.title} : ${f.note || ''}`, 11) + 3, 0);
 
-  return Math.min(CARD_BASE_HEIGHT * 2, CARD_BASE_HEIGHT + titleExtra + fieldsExtra);
+  const height = Math.min(CARD_BASE_HEIGHT * 2, CARD_BASE_HEIGHT + titleExtra + fieldsExtra);
+  cardHeightCache.set(cacheKey, height);
+  return height;
 }
 
 function nodeContent(d) {
@@ -428,11 +451,13 @@ function deriveFunctionLabel(title) {
 }
 
 // True if `ancestorId` is somewhere above `nodeId` in the reporting chain.
+// Called repeatedly (often in nested loops) by computeBubbleTargets, so the
+// id->record lookup is a Map, not a linear .find() over all 300 employees.
 function isAncestor(ancestorId, nodeId) {
-  let cur = flatData.find((d) => d.id === nodeId);
+  let cur = flatDataById.get(nodeId);
   while (cur && cur.manager_id != null) {
     if (cur.manager_id === ancestorId) return true;
-    cur = flatData.find((d) => d.id === cur.manager_id);
+    cur = flatDataById.get(cur.manager_id);
   }
   return false;
 }
@@ -461,13 +486,13 @@ function computeBubbleTargets(cards) {
   // overlapping screen positions purely by coincidence) never get bubbled
   // alongside it.
   const inFocalScope = (id) => currentIsolatedId == null || id === currentIsolatedId || isAncestor(currentIsolatedId, id);
-  const vpLevelVisible = cards.filter((n) => inFocalScope(n.id) && flatData.find((d) => d.id === n.id)?.level === 'VP');
+  const vpLevelVisible = cards.filter((n) => inFocalScope(n.id) && flatDataById.get(n.id)?.level === 'VP');
   if (vpLevelVisible.length >= 2) {
     vpLevelVisible.forEach((n) => targets.set(n.id, false));
   }
 
   if (currentIsolatedId != null) {
-    const focal = flatData.find((d) => d.id === currentIsolatedId);
+    const focal = flatDataById.get(currentIsolatedId);
     if (focal) {
       if (targets.has(focal.id)) {
         // Already bubbled by rule 1 (e.g. isolating a VP whose peers are
@@ -533,7 +558,7 @@ function updateVpBackdropsFromDom() {
     collect(id);
     const groupCards = cards.filter((n) => descendantIds.has(n.id));
     if (!groupCards.length) return null;
-    const nodeData = flatData.find((d) => d.id === id);
+    const nodeData = flatDataById.get(id);
     return {
       nodeId: id,
       isFocal,
@@ -648,7 +673,7 @@ function updateVpBackdropsFromDom() {
     layer.appendChild(backdrop);
 
     if (!showVpLabels) return;
-    const node = flatData.find((d) => d.id === g.nodeId);
+    const node = flatDataById.get(g.nodeId);
     const text = node ? deriveFunctionLabel(node.title) : '';
     const labelColor = darkenColor(color, 0.42);
     const startFontPx = g.isFocal ? 17 : 11;
@@ -1327,6 +1352,7 @@ async function loadOrgData(orgId) {
   flatData = flatten(tree, []);
   originalOrder = flatData.slice();
   nameToId = new Map(flatData.map((d) => [d.name, d.id]));
+  flatDataById = new Map(flatData.map((d) => [d.id, d]));
 
   meta.sellers.forEach((s) => colorForSeller(s));
   buildAmFilter();
