@@ -10,34 +10,64 @@
 <script src="https://cdn.jsdelivr.net/npm/d3-org-chart@3"></script>
 </head>
 <body>
-  <header>
-    <h1>Skunkworks — Account Org Chart</h1>
-    <div class="controls">
+  <aside id="sidebar">
+    <h1>Skunkworks</h1>
+
+    <div class="control-row">
+      <label for="orgSwitcher">Organization</label>
       <select id="orgSwitcher"></select>
-      <button id="newOrgBtn">+ New Org</button>
-
-      <input id="search" type="text" list="employee-list" placeholder="Find a person by name..." autocomplete="off" />
-      <datalist id="employee-list"></datalist>
-      <button id="clearBtn">Show full org</button>
-
-      <label class="sort-label">Sort/group by:
-        <select id="sortBy">
-          <option value="none">None (reporting lines only)</option>
-          <option value="seller">Apex Seller</option>
-          <option value="location">Geography</option>
-        </select>
-      </label>
-
-      <button id="expandAllBtn">Expand all</button>
-      <button id="collapseBtn">Collapse to directors</button>
-
-      <label class="sort-label"><input type="checkbox" id="priorityFilter" /> Show only flagged priority</label>
-
-      <button id="addPersonBtn">+ Add Person</button>
-      <button id="resetOrgBtn" class="danger">Reset Org Data</button>
     </div>
-    <div id="legend"></div>
-  </header>
+    <div class="control-row">
+      <label></label>
+      <button id="newOrgBtn">+ New Org</button>
+    </div>
+
+    <div class="control-row">
+      <label for="search">Find person</label>
+      <input id="search" type="text" list="employee-list" placeholder="Name..." autocomplete="off" />
+      <datalist id="employee-list"></datalist>
+    </div>
+    <div class="control-row">
+      <label></label>
+      <button id="clearBtn">Show Full Org</button>
+    </div>
+
+    <div class="control-row">
+      <label for="sortBy">Sort/Group by</label>
+      <select id="sortBy">
+        <option value="none">None</option>
+        <option value="seller">Apex Seller</option>
+        <option value="location">Geography</option>
+      </select>
+    </div>
+
+    <div class="control-row">
+      <label for="depthSlider">Levels below top</label>
+      <span class="slider-row"><input type="range" id="depthSlider" min="0" max="5" value="2" /><span id="depthValue">2</span></span>
+    </div>
+
+    <div class="control-row">
+      <label for="priorityFilter">Flagged priority only</label>
+      <input type="checkbox" id="priorityFilter" />
+    </div>
+
+    <div class="control-row">
+      <label></label>
+      <button id="addPersonBtn">+ Add Person</button>
+    </div>
+    <div class="control-row">
+      <label></label>
+      <button id="versionHistoryBtn">Version History</button>
+    </div>
+
+    <div id="amFilterSection">
+      <div class="am-filter-header">
+        <h3>Apex Sellers</h3>
+        <button id="allAmsBtn">All AMs</button>
+      </div>
+      <div id="amFilterList"></div>
+    </div>
+  </aside>
 
   <main id="chart"></main>
 
@@ -103,6 +133,21 @@
       <div class="modal-actions">
         <button id="newOrgCancel">Cancel</button>
         <button id="newOrgSubmit">Create</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="versionHistoryModal" class="modal-overlay hidden">
+    <div class="modal modal-wide">
+      <h3>Version History</h3>
+      <p id="versionError" class="modal-error"></p>
+      <div class="version-history-body">
+        <div id="versionList" class="version-list"></div>
+        <div id="versionPreview" class="version-preview"></div>
+      </div>
+      <div class="modal-actions">
+        <button id="versionHistoryClose">Close</button>
+        <button id="restoreVersionBtn" class="danger hidden">Restore this version</button>
       </div>
     </div>
   </div>

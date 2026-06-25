@@ -28,6 +28,7 @@ conn = sqlite3.connect(DB_PATH)
 cur = conn.cursor()
 
 cur.executescript("""
+DROP TABLE IF EXISTS org_versions;
 DROP TABLE IF EXISTS employees;
 DROP TABLE IF EXISTS organizations;
 

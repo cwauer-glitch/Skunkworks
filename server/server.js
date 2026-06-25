@@ -8,8 +8,7 @@ const DB_PATH = process.env.DB_PATH || SEED_DB_PATH;
 const EDIT_PASSCODE = process.env.EDIT_PASSCODE || '';
 
 // On a fresh Railway volume, DB_PATH won't exist yet - seed it from the
-// committed snapshot. The seed file itself is never mutated, so "Reset Org
-// Data" and future deploys always have a known-good copy to restore from.
+// committed snapshot. The seed file itself is never mutated.
 if (DB_PATH !== SEED_DB_PATH && !fs.existsSync(DB_PATH)) {
   fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
   fs.copyFileSync(SEED_DB_PATH, DB_PATH);
@@ -18,6 +17,30 @@ if (DB_PATH !== SEED_DB_PATH && !fs.existsSync(DB_PATH)) {
 
 const db = new Database(DB_PATH);
 console.log(`Skunkworks database open at ${DB_PATH}`);
+
+// Version history: every mutation snapshots the org's full employee state.
+// Runs on every boot so it also migrates the already-deployed Railway DB.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS org_versions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    org_id INTEGER NOT NULL REFERENCES organizations(id),
+    snapshot_json TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  );
+  CREATE INDEX IF NOT EXISTS idx_org_versions_org ON org_versions(org_id);
+`);
+
+function recordVersion(orgId) {
+  const rows = db.prepare('SELECT * FROM employees WHERE org_id = ?').all(orgId);
+  db.prepare('INSERT INTO org_versions (org_id, snapshot_json) VALUES (?, ?)').run(orgId, JSON.stringify(rows));
+}
+
+// Seed version 1 for any org that doesn't have history yet (first boot after
+// this migration, or an org created before version history existed).
+for (const org of db.prepare('SELECT id FROM organizations').all()) {
+  const hasHistory = db.prepare('SELECT COUNT(*) AS c FROM org_versions WHERE org_id = ?').get(org.id).c > 0;
+  if (!hasHistory) recordVersion(org.id);
+}
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -35,8 +58,7 @@ function requirePasscode(req, res, next) {
   res.status(401).json({ error: 'Invalid or missing edit passcode' });
 }
 
-function buildTree(orgId) {
-  const rows = db.prepare('SELECT * FROM employees WHERE org_id = ?').all(orgId);
+function buildTreeFromRows(rows) {
   const byId = new Map(rows.map((row) => [row.id, { ...row, children: [] }]));
   let root = null;
 
@@ -56,6 +78,10 @@ function buildTree(orgId) {
   return root;
 }
 
+function buildTree(orgId) {
+  return buildTreeFromRows(db.prepare('SELECT * FROM employees WHERE org_id = ?').all(orgId));
+}
+
 // True if `candidateId` is `employeeId` itself, or one of its descendants -
 // i.e. setting employeeId's manager to candidateId would create a cycle.
 function isSelfOrDescendant(orgId, employeeId, candidateId) {
@@ -72,7 +98,8 @@ app.post('/api/orgs', requirePasscode, (req, res) => {
   const name = (req.body.name || '').trim();
   if (!name) return res.status(400).json({ error: 'Organization name is required' });
   try {
-    const result = db.prepare('INSERT INTO organizations (name, snapshot_json) VALUES (?, ?)').run(name, '[]');
+    const result = db.prepare('INSERT INTO organizations (name) VALUES (?)').run(name);
+    recordVersion(result.lastInsertRowid);
     res.status(201).json({ id: result.lastInsertRowid, name });
   } catch (err) {
     res.status(409).json({ error: 'An organization with that name already exists' });
@@ -91,6 +118,47 @@ app.get('/api/orgs/:orgId/meta', (req, res) => {
   const locations = db.prepare("SELECT DISTINCT location FROM employees WHERE org_id = ? AND location IS NOT NULL ORDER BY location").all(orgId).map((r) => r.location);
   const people = db.prepare("SELECT id, name, title, status FROM employees WHERE org_id = ? ORDER BY name").all(orgId);
   res.json({ sellers, locations, people });
+});
+
+app.get('/api/orgs/:orgId/versions', (req, res) => {
+  const orgId = Number(req.params.orgId);
+  res.json(db.prepare('SELECT id, created_at FROM org_versions WHERE org_id = ? ORDER BY id DESC').all(orgId));
+});
+
+app.get('/api/orgs/:orgId/versions/:versionId', (req, res) => {
+  const orgId = Number(req.params.orgId);
+  const versionId = Number(req.params.versionId);
+  const version = db.prepare('SELECT * FROM org_versions WHERE org_id = ? AND id = ?').get(orgId, versionId);
+  if (!version) return res.status(404).json({ error: 'Version not found' });
+  res.json({ createdAt: version.created_at, tree: buildTreeFromRows(JSON.parse(version.snapshot_json)) });
+});
+
+const EMPLOYEE_COLUMNS = [
+  'id', 'org_id', 'name', 'title', 'level', 'division', 'location', 'seller', 'seller_territory',
+  'manager_id', 'status', 'departed_name', 'priority_tags', 'priority_goal', 'priority_signal',
+];
+
+function insertEmployeeRow(record) {
+  const columns = EMPLOYEE_COLUMNS.filter((c) => c in record);
+  const placeholders = columns.map((c) => `:${c}`).join(', ');
+  db.prepare(`INSERT INTO employees (${columns.join(', ')}) VALUES (${placeholders})`).run(record);
+}
+
+app.post('/api/orgs/:orgId/versions/:versionId/restore', requirePasscode, (req, res) => {
+  const orgId = Number(req.params.orgId);
+  const versionId = Number(req.params.versionId);
+  const version = db.prepare('SELECT snapshot_json FROM org_versions WHERE org_id = ? AND id = ?').get(orgId, versionId);
+  if (!version) return res.status(404).json({ error: 'Version not found' });
+
+  const rows = JSON.parse(version.snapshot_json);
+  const restoreTx = db.transaction(() => {
+    db.prepare('DELETE FROM employees WHERE org_id = ?').run(orgId);
+    for (const record of rows) insertEmployeeRow(record);
+  });
+  restoreTx();
+  recordVersion(orgId); // restoring is itself a tracked change - history is append-only
+
+  res.json({ restored: rows.length });
 });
 
 const EDITABLE_FIELDS = [
@@ -129,6 +197,7 @@ app.patch('/api/orgs/:orgId/employees/:id', requirePasscode, (req, res) => {
 
   const setClause = Object.keys(updates).map((k) => `${k} = ?`).join(', ');
   db.prepare(`UPDATE employees SET ${setClause} WHERE id = ?`).run(...Object.values(updates), id);
+  recordVersion(orgId);
   res.json(db.prepare('SELECT * FROM employees WHERE id = ?').get(id));
 });
 
@@ -165,14 +234,8 @@ app.post('/api/orgs/:orgId/employees', requirePasscode, (req, res) => {
     priority_signal: req.body.priority_signal || 'none',
   };
 
-  db.prepare(
-    `INSERT INTO employees
-     (id, org_id, name, title, level, division, location, seller, seller_territory,
-      manager_id, status, departed_name, priority_tags, priority_goal, priority_signal)
-     VALUES (:id, :org_id, :name, :title, :level, :division, :location, :seller, :seller_territory,
-             :manager_id, :status, :departed_name, :priority_tags, :priority_goal, :priority_signal)`
-  ).run(record);
-
+  insertEmployeeRow(record);
+  recordVersion(orgId);
   res.status(201).json(record);
 });
 
@@ -181,10 +244,44 @@ app.post('/api/orgs/:orgId/employees/:id/mark-departed', requirePasscode, (req, 
   const id = Number(req.params.id);
   const employee = db.prepare('SELECT * FROM employees WHERE org_id = ? AND id = ?').get(orgId, id);
   if (!employee) return res.status(404).json({ error: 'Employee not found' });
-  if (employee.manager_id === null) return res.status(400).json({ error: 'Cannot mark the top of the org chart as departed' });
 
   db.prepare("UPDATE employees SET status = 'vacant', departed_name = ? WHERE id = ?")
     .run(`${employee.name}${employee.title ? `, ${employee.title}` : ''}`, id);
+  recordVersion(orgId);
+
+  res.json(db.prepare('SELECT * FROM employees WHERE id = ?').get(id));
+});
+
+// Refills a vacant slot in place - same row, same manager_id, same direct
+// reports, just new identity fields and status flipped back to active. This
+// is also how a departed CTO/root gets replaced.
+app.post('/api/orgs/:orgId/employees/:id/fill', requirePasscode, (req, res) => {
+  const orgId = Number(req.params.orgId);
+  const id = Number(req.params.id);
+  const employee = db.prepare('SELECT * FROM employees WHERE org_id = ? AND id = ?').get(orgId, id);
+  if (!employee) return res.status(404).json({ error: 'Employee not found' });
+  if (employee.status !== 'vacant') return res.status(400).json({ error: 'Only a vacant slot can be filled' });
+
+  const name = (req.body.name || '').trim();
+  if (!name) return res.status(400).json({ error: 'Name is required' });
+
+  const updates = {
+    name,
+    title: req.body.title || null,
+    level: req.body.level || null,
+    division: req.body.division || null,
+    location: req.body.location || null,
+    seller: req.body.seller || null,
+    seller_territory: req.body.seller_territory || null,
+    priority_tags: req.body.priority_tags || null,
+    priority_goal: req.body.priority_goal || null,
+    priority_signal: req.body.priority_signal || 'none',
+    status: 'active',
+    departed_name: null,
+  };
+  const setClause = Object.keys(updates).map((k) => `${k} = ?`).join(', ');
+  db.prepare(`UPDATE employees SET ${setClause} WHERE id = ?`).run(...Object.values(updates), id);
+  recordVersion(orgId);
 
   res.json(db.prepare('SELECT * FROM employees WHERE id = ?').get(id));
 });
@@ -195,6 +292,9 @@ app.post('/api/orgs/:orgId/employees/:id/finalize-removal', requirePasscode, (re
   const employee = db.prepare('SELECT * FROM employees WHERE org_id = ? AND id = ?').get(orgId, id);
   if (!employee) return res.status(404).json({ error: 'Employee not found' });
   if (employee.status !== 'vacant') return res.status(400).json({ error: 'Only a vacant slot can be finalized' });
+  if (employee.manager_id === null) {
+    return res.status(400).json({ error: 'The top of the org chart cannot be permanently removed - use "Fill this position" to replace them instead.' });
+  }
 
   const reassignTo = req.body.reassignTo === undefined || req.body.reassignTo === null ? null : Number(req.body.reassignTo);
   if (reassignTo !== null) {
@@ -215,30 +315,9 @@ app.post('/api/orgs/:orgId/employees/:id/finalize-removal', requirePasscode, (re
     db.prepare('DELETE FROM employees WHERE id = ?').run(id);
   });
   update();
+  recordVersion(orgId);
 
   res.status(204).end();
-});
-
-app.post('/api/orgs/:orgId/reset', requirePasscode, (req, res) => {
-  const orgId = Number(req.params.orgId);
-  const org = db.prepare('SELECT snapshot_json FROM organizations WHERE id = ?').get(orgId);
-  if (!org) return res.status(404).json({ error: 'Organization not found' });
-
-  const snapshot = JSON.parse(org.snapshot_json || '[]');
-  const resetTx = db.transaction(() => {
-    db.prepare('DELETE FROM employees WHERE org_id = ?').run(orgId);
-    const insert = db.prepare(
-      `INSERT INTO employees
-       (id, org_id, name, title, level, division, location, seller, seller_territory,
-        manager_id, status, departed_name, priority_tags, priority_goal, priority_signal)
-       VALUES (:id, :org_id, :name, :title, :level, :division, :location, :seller, :seller_territory,
-               :manager_id, :status, :departed_name, :priority_tags, :priority_goal, :priority_signal)`
-    );
-    for (const record of snapshot) insert.run(record);
-  });
-  resetTx();
-
-  res.json({ restored: snapshot.length });
 });
 
 app.listen(PORT, () => {

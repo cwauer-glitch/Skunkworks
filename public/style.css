@@ -9,74 +9,131 @@ body {
   color: #1a1a1a;
 }
 
-header {
+#sidebar {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 280px;
+  height: 100%;
   background: #1f2430;
   color: #fff;
-  padding: 16px 24px;
+  padding: 16px;
+  overflow-y: auto;
+  z-index: 40;
 }
 
-header h1 {
-  margin: 0 0 12px;
-  font-size: 20px;
+#sidebar h1 {
+  margin: 0 0 16px;
+  font-size: 18px;
 }
 
-.controls {
+.control-row {
   display: flex;
-  flex-wrap: wrap;
-  gap: 10px;
+  justify-content: space-between;
   align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
 }
 
-.controls input, .controls select, .controls button {
-  padding: 6px 10px;
-  font-size: 14px;
+.control-row label {
+  font-size: 12px;
+  flex: 1;
+}
+
+.control-row select,
+.control-row input[type="text"] {
+  flex: 1;
+  max-width: 150px;
+}
+
+.control-row button {
+  width: 100%;
+}
+
+.slider-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+}
+
+.slider-row input[type="range"] {
+  flex: 1;
+}
+
+#sidebar input, #sidebar select, #sidebar button {
+  padding: 5px 8px;
+  font-size: 13px;
   border-radius: 6px;
   border: 1px solid #444;
 }
 
-.controls button {
+#sidebar button {
   background: #3a7bd5;
   color: #fff;
   border: none;
   cursor: pointer;
 }
 
-.controls button:hover {
+#sidebar button:hover {
   background: #2f63ad;
 }
 
-.sort-label {
-  font-size: 14px;
-  display: flex;
-  align-items: center;
-  gap: 6px;
+#sidebar button.danger {
+  background: #c0392b;
 }
 
-#legend {
-  margin-top: 10px;
+#sidebar button.danger:hover {
+  background: #992d22;
+}
+
+#amFilterSection {
+  margin-top: 20px;
+  border-top: 1px solid #3a4150;
+  padding-top: 12px;
+}
+
+.am-filter-header {
   display: flex;
-  flex-wrap: wrap;
-  gap: 14px;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.am-filter-header h3 {
+  margin: 0;
   font-size: 13px;
 }
 
-.legend-item {
+.am-filter-header button {
+  font-size: 11px;
+  padding: 3px 8px;
+  width: auto;
+}
+
+.am-filter-item {
   display: flex;
   align-items: center;
   gap: 6px;
+  font-size: 12px;
+  margin-bottom: 6px;
 }
 
-.legend-swatch {
-  width: 12px;
-  height: 12px;
+.am-filter-swatch {
+  width: 10px;
+  height: 10px;
   border-radius: 3px;
   display: inline-block;
+  flex-shrink: 0;
 }
 
 #chart {
-  width: 100%;
-  height: calc(100vh - 120px);
-  position: relative;
+  position: absolute;
+  top: 0;
+  left: 280px;
+  right: 0;
+  bottom: 0;
+  overflow: hidden;
 }
 
 #detailPanel {
@@ -112,6 +169,12 @@ header h1 {
   cursor: pointer;
 }
 
+.org-card {
+  transform-origin: center;
+  transition: transform 80ms ease-out;
+  will-change: transform;
+}
+
 .node-card-title {
   font-weight: 600;
 }
@@ -119,14 +182,6 @@ header h1 {
 .node-card-sub {
   font-size: 11px;
   opacity: 0.85;
-}
-
-.controls button.danger {
-  background: #c0392b;
-}
-
-.controls button.danger:hover {
-  background: #992d22;
 }
 
 .priority-badge {
@@ -175,6 +230,33 @@ header h1 {
   resize: vertical;
 }
 
+.detail-section {
+  border-top: 1px solid #eee;
+  margin-top: 16px;
+  padding-top: 12px;
+}
+
+.detail-section h4 {
+  margin: 0 0 8px;
+  font-size: 13px;
+}
+
+.reassign-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  font-size: 12px;
+}
+
+.reassign-row span {
+  flex: 1;
+}
+
+.reassign-row select {
+  flex: 1;
+}
+
 .modal-actions {
   display: flex;
   gap: 8px;
@@ -193,6 +275,10 @@ header h1 {
 
 .modal-actions button.danger {
   background: #c0392b;
+}
+
+.modal-actions button.hidden {
+  display: none;
 }
 
 .modal-error {
@@ -227,6 +313,10 @@ header h1 {
   overflow-y: auto;
 }
 
+.modal.modal-wide {
+  width: 720px;
+}
+
 .modal h3 {
   margin: 0 0 8px;
 }
@@ -253,4 +343,39 @@ header h1 {
 .modal textarea {
   min-height: 50px;
   resize: vertical;
+}
+
+.version-history-body {
+  display: flex;
+  gap: 16px;
+  min-height: 320px;
+}
+
+.version-list {
+  width: 220px;
+  border-right: 1px solid #eee;
+  overflow-y: auto;
+  max-height: 400px;
+}
+
+.version-item {
+  padding: 8px;
+  font-size: 12px;
+  border-radius: 5px;
+  cursor: pointer;
+}
+
+.version-item:hover {
+  background: #f0f0f0;
+}
+
+.version-item.selected {
+  background: #dbe9fb;
+}
+
+.version-preview {
+  flex: 1;
+  font-size: 12px;
+  overflow-y: auto;
+  max-height: 400px;
 }

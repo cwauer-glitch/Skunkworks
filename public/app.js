@@ -9,6 +9,9 @@ let originalOrder = [];
 let nameToId = new Map();
 let currentOrgId = null;
 let showOnlyFlagged = false;
+let selectedSellers = new Set();
+let currentIsolatedId = null;
+let depthSliderValue = 2;
 
 function colorForSeller(seller) {
   if (!seller) return '#9aa0a6';
@@ -62,8 +65,6 @@ function promptForPasscode() {
   });
 }
 
-// Performs a mutating request, prompting for a passcode if none is cached yet,
-// and re-prompting (clearing the bad one) if the server rejects it.
 async function editFetch(url, options) {
   let passcode = getCachedPasscode();
   if (!passcode) {
@@ -96,7 +97,7 @@ async function editFetch(url, options) {
   return res;
 }
 
-// ---------- Tree building ----------
+// ---------- Tree flattening ----------
 
 function flatten(node, out) {
   out.push({ ...node, children: undefined });
@@ -106,23 +107,43 @@ function flatten(node, out) {
   return out;
 }
 
-function buildLegend() {
-  const legend = document.getElementById('legend');
-  legend.innerHTML = '';
-  for (const [seller, color] of sellerColorMap.entries()) {
+function trueRootId() {
+  const root = flatData.find((d) => d.manager_id == null);
+  return root ? root.id : null;
+}
+
+// ---------- AM (seller) filter ----------
+
+function buildAmFilter() {
+  const container = document.getElementById('amFilterList');
+  container.innerHTML = '';
+  for (const seller of sellerColorMap.keys()) {
+    const color = colorForSeller(seller);
+    const safeId = `am-${seller.replace(/[^a-zA-Z0-9]/g, '-')}`;
     const item = document.createElement('div');
-    item.className = 'legend-item';
-    item.innerHTML = `<span class="legend-swatch" style="background:${color}"></span>${seller}`;
-    legend.appendChild(item);
+    item.className = 'am-filter-item';
+    item.innerHTML = `
+      <input type="checkbox" id="${safeId}" ${selectedSellers.has(seller) ? 'checked' : ''} />
+      <span class="am-filter-swatch" style="background:${color}"></span>
+      <label for="${safeId}">${seller}</label>
+    `;
+    item.querySelector('input').addEventListener('change', (e) => {
+      if (e.target.checked) selectedSellers.add(seller);
+      else selectedSellers.delete(seller);
+      chart.render();
+    });
+    container.appendChild(item);
   }
 }
+
+// ---------- Chart rendering ----------
 
 function nodeContent(d) {
   const data = d.data;
 
   if (data.status === 'vacant') {
     return `
-      <div style="width:220px; border:3px solid #d33; border-radius:8px; background:#fdeaea; padding:8px 10px; font-family:inherit;">
+      <div class="org-card" style="width:220px; border:3px solid #d33; border-radius:8px; background:#fdeaea; padding:8px 10px; font-family:inherit;">
         <div class="node-card-title" style="color:#a00;">VACANT</div>
         <div class="node-card-sub">previously: ${data.departed_name || 'Unknown'}</div>
         <div class="node-card-sub">${data.location || ''}</div>
@@ -131,7 +152,16 @@ function nodeContent(d) {
   }
 
   const color = colorForSeller(data.seller);
-  const dim = showOnlyFlagged && data.priority_signal !== 'high';
+  let opacity = 1;
+  let filterCss = 'none';
+  if (selectedSellers.size > 0 && !selectedSellers.has(data.seller)) {
+    filterCss = 'grayscale(1)';
+    opacity = 0.5;
+  }
+  if (showOnlyFlagged && data.priority_signal !== 'high') {
+    opacity = Math.min(opacity, 0.25);
+  }
+
   const badge = data.priority_signal === 'high'
     ? '<span class="priority-badge priority-high" title="High priority signal">★</span>'
     : data.priority_signal === 'watch'
@@ -139,7 +169,7 @@ function nodeContent(d) {
       : '';
 
   return `
-    <div style="position:relative; width:220px; border:2px solid ${color}; border-radius:8px; background:#fff; padding:8px 10px; font-family:inherit; opacity:${dim ? 0.25 : 1};">
+    <div class="org-card" style="position:relative; width:220px; border:2px solid ${color}; border-radius:8px; background:#fff; padding:8px 10px; font-family:inherit; opacity:${opacity}; filter:${filterCss};">
       ${badge}
       <div class="node-card-title">${data.name}</div>
       <div class="node-card-sub">${data.title || ''}</div>
@@ -147,6 +177,21 @@ function nodeContent(d) {
       ${data.seller ? `<div class="node-card-sub" style="color:${color}; font-weight:600;">${data.seller}</div>` : ''}
     </div>
   `;
+}
+
+let clickTimer = null;
+
+function handleNodeClick(d) {
+  if (clickTimer) {
+    clearTimeout(clickTimer);
+    clickTimer = null;
+    showDetail(d.data);
+  } else {
+    clickTimer = setTimeout(() => {
+      clickTimer = null;
+      isolatePerson(d.data.id);
+    }, 250);
+  }
 }
 
 function renderChart(data) {
@@ -163,8 +208,123 @@ function renderChart(data) {
     .compactMarginPair(() => 60)
     .neighbourMargin(() => 30)
     .nodeContent(nodeContent)
-    .onNodeClick((d) => showDetail(d.data))
+    .onNodeClick(handleNodeClick)
+    .onZoom(() => scheduleRectRefresh())
     .render();
+  scheduleRectRefresh();
+}
+
+// ---------- Hover-magnify effect ----------
+
+let nodeRects = [];
+let scaledEls = new Set();
+let maxBoost = 0.3;
+let mouseMoveRafPending = false;
+
+function refreshNodeRects() {
+  const cards = document.querySelectorAll('#chart .org-card');
+  nodeRects = Array.from(cards).map((el) => {
+    const rect = el.getBoundingClientRect();
+    return { el, cx: rect.left + rect.width / 2, cy: rect.top + rect.height / 2 };
+  });
+  const count = nodeRects.length || 1;
+  const normalized = Math.min(count / 300, 1);
+  maxBoost = 0.15 + normalized * (1.2 - 0.15);
+}
+
+function scheduleRectRefresh() {
+  // d3-org-chart animates layout changes (~400ms transition) - wait for it to
+  // settle before caching screen positions, or the magnify radius would be stale.
+  setTimeout(refreshNodeRects, 450);
+}
+
+function handleChartMouseMove(e) {
+  if (mouseMoveRafPending) return;
+  mouseMoveRafPending = true;
+  requestAnimationFrame(() => {
+    mouseMoveRafPending = false;
+    const radius = 160;
+    const stillScaled = new Set();
+    for (const node of nodeRects) {
+      const dx = e.clientX - node.cx;
+      const dy = e.clientY - node.cy;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      if (dist < radius) {
+        const t = dist / radius;
+        const scale = 1 + maxBoost * (1 - t);
+        node.el.style.transform = `scale(${scale})`;
+        node.el.style.zIndex = '10';
+        stillScaled.add(node.el);
+      }
+    }
+    for (const el of scaledEls) {
+      if (!stillScaled.has(el)) {
+        el.style.transform = 'scale(1)';
+        el.style.zIndex = '';
+      }
+    }
+    scaledEls = stillScaled;
+  });
+}
+
+// ---------- Depth limit (replaces the old fixed collapse-to-directors) ----------
+
+function applyDepthLimit() {
+  const viewRootId = currentIsolatedId != null ? currentIsolatedId : trueRootId();
+  if (viewRootId == null) return;
+
+  chart.collapseAll();
+
+  // d3-org-chart's _expanded flag reveals the FLAGGED node itself, by
+  // unwinding the collapse state of its ancestor chain up to the root - it
+  // does not reveal that node's children. So to show N levels below the view
+  // root, flag every node at depth 1..N relative to it (not its ancestors).
+  if (currentIsolatedId != null) {
+    chart.setExpanded(currentIsolatedId, true); // unwinds the full path up to the true root
+  }
+
+  let frontier = [viewRootId];
+  for (let level = 1; level <= depthSliderValue && frontier.length; level++) {
+    const next = [];
+    for (const id of frontier) {
+      flatData.filter((d) => d.manager_id === id).forEach((c) => {
+        chart.setExpanded(c.id, true);
+        next.push(c.id);
+      });
+    }
+    frontier = next;
+  }
+
+  chart.render().fit();
+  scheduleRectRefresh();
+}
+
+// ---------- Isolate view ----------
+
+function isolatePerson(id) {
+  currentIsolatedId = id;
+  const ancestorIds = new Set();
+  let cur = flatData.find((d) => d.id === id);
+  while (cur) {
+    ancestorIds.add(cur.id);
+    cur = cur.manager_id != null ? flatData.find((d) => d.id === cur.manager_id) : null;
+  }
+  const keepIds = new Set(ancestorIds);
+  const collectDescendants = (pid) => {
+    keepIds.add(pid);
+    flatData.filter((d) => d.manager_id === pid).forEach((c) => collectDescendants(c.id));
+  };
+  collectDescendants(id);
+
+  const filtered = flatData.filter((d) => keepIds.has(d.id));
+  chart.data(filtered).render();
+  applyDepthLimit();
+}
+
+function showFullOrg() {
+  currentIsolatedId = null;
+  chart.data(originalOrder).render();
+  applyDepthLimit();
 }
 
 // ---------- Detail panel ----------
@@ -185,38 +345,150 @@ function managerOptions(selectEl, excludeId) {
   selectEl.innerHTML = `<option value="">— none (top of chart) —</option>${options}`;
 }
 
+function personFormFields(prefix, data = {}) {
+  return `
+    <label>Name <input id="${prefix}Name" type="text" value="${data.name || ''}" /></label>
+    <label>Title <input id="${prefix}Title" type="text" value="${data.title || ''}" /></label>
+    <label>Level
+      <select id="${prefix}Level">
+        ${['CTO', 'SVP', 'VP', 'Director', 'Manager', 'Staff'].map((lvl) =>
+          `<option value="${lvl}" ${data.level === lvl ? 'selected' : ''}>${lvl}</option>`).join('')}
+      </select>
+    </label>
+    <label>Division <input id="${prefix}Division" type="text" value="${data.division || ''}" /></label>
+    <label>Location <input id="${prefix}Location" type="text" value="${data.location || ''}" /></label>
+    <label>Apex Seller <input id="${prefix}Seller" type="text" value="${data.seller || ''}" /></label>
+    <label>Seller Territory <input id="${prefix}SellerTerritory" type="text" value="${data.seller_territory || ''}" /></label>
+    <label>Priority Tags <input id="${prefix}PriorityTags" type="text" value="${data.priority_tags || ''}" /></label>
+    <label>Priority Goal <textarea id="${prefix}PriorityGoal">${data.priority_goal || ''}</textarea></label>
+    <label>Priority Signal
+      <select id="${prefix}PrioritySignal">
+        <option value="none" ${data.priority_signal === 'none' ? 'selected' : ''}>None</option>
+        <option value="watch" ${data.priority_signal === 'watch' ? 'selected' : ''}>Watch</option>
+        <option value="high" ${data.priority_signal === 'high' ? 'selected' : ''}>High</option>
+      </select>
+    </label>
+  `;
+}
+
+function readPersonForm(prefix) {
+  return {
+    name: document.getElementById(`${prefix}Name`).value.trim(),
+    title: document.getElementById(`${prefix}Title`).value.trim(),
+    level: document.getElementById(`${prefix}Level`).value,
+    division: document.getElementById(`${prefix}Division`).value.trim(),
+    location: document.getElementById(`${prefix}Location`).value.trim(),
+    seller: document.getElementById(`${prefix}Seller`).value.trim(),
+    seller_territory: document.getElementById(`${prefix}SellerTerritory`).value.trim(),
+    priority_tags: document.getElementById(`${prefix}PriorityTags`).value.trim(),
+    priority_goal: document.getElementById(`${prefix}PriorityGoal`).value.trim(),
+    priority_signal: document.getElementById(`${prefix}PrioritySignal`).value,
+  };
+}
+
 function showDetail(data) {
   const panel = document.getElementById('detailPanel');
   const content = document.getElementById('detailContent');
 
   if (data.status === 'vacant') {
+    const isRoot = data.manager_id === null;
+    const directReports = flatData.filter((d) => d.manager_id === data.id);
+
     content.innerHTML = `
       <h2 style="color:#a00;">Vacant Slot</h2>
       <p>Previously: <strong>${data.departed_name || 'Unknown'}</strong></p>
       <p>Location: ${data.location || '—'} &middot; Division: ${data.division || '—'}</p>
       <p>Apex Seller: ${data.seller || '—'} ${data.seller_territory ? `(${data.seller_territory})` : ''}</p>
-      <hr />
-      <label>Reassign direct reports to:
-        <select id="reassignTarget"></select>
-      </label>
-      <div class="modal-actions">
-        <button id="removeVacantBtn" class="danger">Remove this vacant slot</button>
+
+      <div class="detail-section">
+        <h4>Fill this position</h4>
+        ${personFormFields('fill')}
+        <p id="fillError" class="modal-error"></p>
+        <div class="modal-actions"><button id="fillPositionBtn">Fill position</button></div>
+      </div>
+
+      ${directReports.length > 0 ? `
+        <div class="detail-section">
+          <h4>Reassign direct reports individually</h4>
+          ${directReports.map((r) => `
+            <div class="reassign-row" data-report-id="${r.id}">
+              <span>${r.name}</span>
+              <select class="individual-reassign-select"></select>
+              <button class="individual-reassign-apply">Apply</button>
+            </div>
+          `).join('')}
+        </div>
+      ` : ''}
+
+      <div class="detail-section">
+        <h4>Remove this vacant slot</h4>
+        ${isRoot
+          ? '<p class="modal-error">The top of the org chart can\'t be permanently removed — use "Fill this position" above instead.</p>'
+          : `
+            <label>Reassign direct reports to:
+              <select id="reassignTarget"></select>
+            </label>
+            <div class="modal-actions">
+              <button id="removeVacantBtn" class="danger">Remove this vacant slot</button>
+            </div>
+          `}
       </div>
     `;
-    const select = document.getElementById('reassignTarget');
-    managerOptions(select, data.id);
-    document.getElementById('removeVacantBtn').addEventListener('click', async () => {
-      const reassignTo = select.value || null;
-      const res = await editFetch(`/api/orgs/${currentOrgId}/employees/${data.id}/finalize-removal`, {
+
+    document.getElementById('fillPositionBtn').addEventListener('click', async () => {
+      const body = readPersonForm('fill');
+      if (!body.name) {
+        document.getElementById('fillError').textContent = 'Name is required.';
+        return;
+      }
+      const res = await editFetch(`/api/orgs/${currentOrgId}/employees/${data.id}/fill`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ reassignTo }),
+        body: JSON.stringify(body),
       });
       if (res) {
         panel.classList.remove('open');
         await loadOrgData(currentOrgId);
       }
     });
+
+    directReports.forEach((r) => {
+      const row = content.querySelector(`.reassign-row[data-report-id="${r.id}"]`);
+      const select = row.querySelector('.individual-reassign-select');
+      managerOptions(select, r.id);
+      row.querySelector('.individual-reassign-apply').addEventListener('click', async () => {
+        if (!select.value) return;
+        const res = await editFetch(`/api/orgs/${currentOrgId}/employees/${r.id}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ manager_id: Number(select.value) }),
+        });
+        if (res) {
+          panel.classList.remove('open');
+          await loadOrgData(currentOrgId);
+        }
+      });
+    });
+
+    if (!isRoot) {
+      const select = document.getElementById('reassignTarget');
+      managerOptions(select, data.id);
+      document.getElementById('removeVacantBtn').addEventListener('click', async () => {
+        if (!confirm('Remove this vacant slot permanently? This cannot be undone from the card itself.')) return;
+        if (!confirm('Really sure? Double-checking before this position is deleted for good.')) return;
+        const reassignTo = select.value || null;
+        const res = await editFetch(`/api/orgs/${currentOrgId}/employees/${data.id}/finalize-removal`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ reassignTo }),
+        });
+        if (res) {
+          panel.classList.remove('open');
+          await loadOrgData(currentOrgId);
+        }
+      });
+    }
+
     panel.classList.remove('hidden');
     panel.classList.add('open');
     return;
@@ -224,26 +496,12 @@ function showDetail(data) {
 
   content.innerHTML = `
     <h2>${data.name}</h2>
-    <label>Name <input id="edName" type="text" value="${data.name || ''}" /></label>
-    <label>Title <input id="edTitle" type="text" value="${data.title || ''}" /></label>
-    <label>Division <input id="edDivision" type="text" value="${data.division || ''}" /></label>
-    <label>Location <input id="edLocation" type="text" value="${data.location || ''}" /></label>
-    <label>Apex Seller <input id="edSeller" type="text" value="${data.seller || ''}" /></label>
-    <label>Seller Territory <input id="edSellerTerritory" type="text" value="${data.seller_territory || ''}" /></label>
+    ${personFormFields('ed', data)}
     <label>Reports To <select id="edManager"></select></label>
-    <label>Priority Tags <input id="edPriorityTags" type="text" value="${data.priority_tags || ''}" /></label>
-    <label>Priority Goal <textarea id="edPriorityGoal">${data.priority_goal || ''}</textarea></label>
-    <label>Priority Signal
-      <select id="edPrioritySignal">
-        <option value="none" ${data.priority_signal === 'none' ? 'selected' : ''}>None</option>
-        <option value="watch" ${data.priority_signal === 'watch' ? 'selected' : ''}>Watch</option>
-        <option value="high" ${data.priority_signal === 'high' ? 'selected' : ''}>High</option>
-      </select>
-    </label>
     <p id="editError" class="modal-error"></p>
     <div class="modal-actions">
       <button id="saveDetailBtn">Save changes</button>
-      ${data.manager_id !== null ? '<button id="markDepartedBtn" class="danger">Mark as Departed</button>' : ''}
+      <button id="markDepartedBtn" class="danger">Mark as Departed</button>
     </div>
   `;
 
@@ -252,18 +510,8 @@ function showDetail(data) {
   managerSelect.value = data.manager_id != null ? String(data.manager_id) : '';
 
   document.getElementById('saveDetailBtn').addEventListener('click', async () => {
-    const body = {
-      name: document.getElementById('edName').value.trim(),
-      title: document.getElementById('edTitle').value.trim(),
-      division: document.getElementById('edDivision').value.trim(),
-      location: document.getElementById('edLocation').value.trim(),
-      seller: document.getElementById('edSeller').value.trim(),
-      seller_territory: document.getElementById('edSellerTerritory').value.trim(),
-      priority_tags: document.getElementById('edPriorityTags').value.trim(),
-      priority_goal: document.getElementById('edPriorityGoal').value.trim(),
-      priority_signal: document.getElementById('edPrioritySignal').value,
-      manager_id: managerSelect.value ? Number(managerSelect.value) : null,
-    };
+    const body = readPersonForm('ed');
+    body.manager_id = managerSelect.value ? Number(managerSelect.value) : null;
     const res = await editFetch(`/api/orgs/${currentOrgId}/employees/${data.id}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
@@ -275,73 +523,50 @@ function showDetail(data) {
     }
   });
 
-  const markDepartedBtn = document.getElementById('markDepartedBtn');
-  if (markDepartedBtn) {
-    markDepartedBtn.addEventListener('click', async () => {
-      if (!confirm(`Mark ${data.name} as departed? Their card will become a vacant placeholder; nobody is reassigned until you finalize it later.`)) return;
-      const res = await editFetch(`/api/orgs/${currentOrgId}/employees/${data.id}/mark-departed`, {
-        method: 'POST',
-      });
-      if (res) {
-        panel.classList.remove('open');
-        await loadOrgData(currentOrgId);
-      }
+  document.getElementById('markDepartedBtn').addEventListener('click', async () => {
+    if (!confirm(`Mark ${data.name} as departed? Their card will become a vacant placeholder; nobody is reassigned until you act on it later.`)) return;
+    const res = await editFetch(`/api/orgs/${currentOrgId}/employees/${data.id}/mark-departed`, {
+      method: 'POST',
     });
-  }
+    if (res) {
+      panel.classList.remove('open');
+      await loadOrgData(currentOrgId);
+    }
+  });
 
   panel.classList.remove('hidden');
   panel.classList.add('open');
 }
 
-// ---------- Sort / expand helpers ----------
+// ---------- Sort ----------
 
 function applySort(mode) {
   if (mode === 'none') {
-    chart.data(originalOrder).render();
-    return;
+    chart.data(currentIsolatedId != null ? chart.data() : originalOrder).render();
+  } else {
+    const key = mode === 'seller' ? 'seller' : 'location';
+    const base = currentIsolatedId != null ? chart.data() : flatData;
+    const sorted = [...base].sort((a, b) => (a[key] || '').localeCompare(b[key] || ''));
+    chart.data(sorted).render();
   }
-  const key = mode === 'seller' ? 'seller' : 'location';
-  const sorted = [...flatData].sort((a, b) => (a[key] || '').localeCompare(b[key] || ''));
-  chart.data(sorted).render();
+  scheduleRectRefresh();
 }
 
-function collapseToDirectors() {
-  chart.collapseAll();
-  flatData
-    .filter((d) => ['CTO', 'SVP', 'VP'].includes(d.level))
-    .forEach((d) => chart.setExpanded(d.id, true));
-  chart.render().fit();
-}
-
-function expandSubtree(rootId) {
-  const childrenByParent = new Map();
-  for (const d of flatData) {
-    if (d.manager_id == null) continue;
-    if (!childrenByParent.has(d.manager_id)) childrenByParent.set(d.manager_id, []);
-    childrenByParent.get(d.manager_id).push(d.id);
-  }
-  const stack = [rootId];
-  while (stack.length) {
-    const id = stack.pop();
-    chart.setExpanded(id, true);
-    (childrenByParent.get(id) || []).forEach((childId) => stack.push(childId));
-  }
-}
+// ---------- Search ----------
 
 function focusOnPerson(name) {
   const id = nameToId.get(name);
   if (!id) return;
-  chart.clearHighlighting();
-  collapseToDirectors();
-  chart.setUpToTheRootHighlighted(id).setCentered(id);
-  expandSubtree(id);
-  chart.render().fit();
+  isolatePerson(id);
+  chart.setUpToTheRootHighlighted(id).setCentered(id).render().fit();
+  scheduleRectRefresh();
 }
 
 // ---------- Org loading ----------
 
 async function loadOrgData(orgId) {
   currentOrgId = orgId;
+  currentIsolatedId = null;
   const [treeRes, metaRes] = await Promise.all([
     fetch(`/api/orgs/${orgId}/tree`),
     fetch(`/api/orgs/${orgId}/meta`),
@@ -355,10 +580,10 @@ async function loadOrgData(orgId) {
   nameToId = new Map(flatData.map((d) => [d.name, d.id]));
 
   meta.sellers.forEach((s) => colorForSeller(s));
-  buildLegend();
+  buildAmFilter();
 
   renderChart(flatData);
-  collapseToDirectors();
+  applyDepthLimit();
 
   const dataList = document.getElementById('employee-list');
   dataList.innerHTML = meta.people
@@ -380,7 +605,48 @@ async function loadOrgSwitcher(selectOrgId) {
   }
 }
 
-// ---------- Modals ----------
+// ---------- Version history ----------
+
+let selectedVersionId = null;
+
+async function openVersionHistory() {
+  document.getElementById('versionError').textContent = '';
+  document.getElementById('restoreVersionBtn').classList.add('hidden');
+  selectedVersionId = null;
+  const res = await fetch(`/api/orgs/${currentOrgId}/versions`);
+  const versions = await res.json();
+  const list = document.getElementById('versionList');
+  list.innerHTML = versions
+    .map((v) => `<div class="version-item" data-id="${v.id}">${new Date(`${v.created_at}Z`).toLocaleString()}</div>`)
+    .join('');
+  list.querySelectorAll('.version-item').forEach((el) => {
+    el.addEventListener('click', () => previewVersion(Number(el.dataset.id), el));
+  });
+  document.getElementById('versionPreview').innerHTML = '<p>Select a version to preview.</p>';
+  document.getElementById('versionHistoryModal').classList.remove('hidden');
+}
+
+function countTreeNodes(node) {
+  if (!node) return 0;
+  return 1 + (node.children || []).reduce((sum, c) => sum + countTreeNodes(c), 0);
+}
+
+async function previewVersion(versionId, el) {
+  document.querySelectorAll('.version-item').forEach((i) => i.classList.remove('selected'));
+  el.classList.add('selected');
+  selectedVersionId = versionId;
+  const res = await fetch(`/api/orgs/${currentOrgId}/versions/${versionId}`);
+  const data = await res.json();
+  const preview = document.getElementById('versionPreview');
+  preview.innerHTML = `
+    <p><strong>${new Date(`${data.createdAt}Z`).toLocaleString()}</strong></p>
+    <p>Top of chart: ${data.tree ? `${data.tree.name}${data.tree.status === 'vacant' ? ' (vacant)' : ''}` : '— empty —'}</p>
+    <p>Total people: ${countTreeNodes(data.tree)}</p>
+  `;
+  document.getElementById('restoreVersionBtn').classList.remove('hidden');
+}
+
+// ---------- Init ----------
 
 function setupModal(modalId, cancelId) {
   const modal = document.getElementById(modalId);
@@ -389,6 +655,9 @@ function setupModal(modalId, cancelId) {
 
 async function init() {
   await loadOrgSwitcher();
+
+  document.getElementById('chart').addEventListener('mousemove', handleChartMouseMove);
+  window.addEventListener('resize', () => scheduleRectRefresh());
 
   document.getElementById('orgSwitcher').addEventListener('change', async (e) => {
     const orgId = Number(e.target.value);
@@ -404,12 +673,17 @@ async function init() {
   document.getElementById('clearBtn').addEventListener('click', () => {
     document.getElementById('search').value = '';
     chart.clearHighlighting();
-    collapseToDirectors();
+    showFullOrg();
   });
 
   document.getElementById('sortBy').addEventListener('change', (e) => applySort(e.target.value));
-  document.getElementById('expandAllBtn').addEventListener('click', () => chart.expandAll().fit());
-  document.getElementById('collapseBtn').addEventListener('click', collapseToDirectors);
+
+  document.getElementById('depthSlider').addEventListener('input', (e) => {
+    depthSliderValue = Number(e.target.value);
+    document.getElementById('depthValue').textContent = String(depthSliderValue);
+    applyDepthLimit();
+  });
+
   document.getElementById('closeDetail').addEventListener('click', () => {
     document.getElementById('detailPanel').classList.remove('open');
   });
@@ -419,10 +693,25 @@ async function init() {
     chart.render();
   });
 
-  document.getElementById('resetOrgBtn').addEventListener('click', async () => {
-    if (!confirm('Reset this organization back to its original imported data? All edits will be lost.')) return;
-    const res = await editFetch(`/api/orgs/${currentOrgId}/reset`, { method: 'POST' });
-    if (res) await loadOrgData(currentOrgId);
+  document.getElementById('allAmsBtn').addEventListener('click', () => {
+    selectedSellers.clear();
+    buildAmFilter();
+    chart.render();
+  });
+
+  // Version history modal
+  document.getElementById('versionHistoryBtn').addEventListener('click', openVersionHistory);
+  document.getElementById('versionHistoryClose').addEventListener('click', () => {
+    document.getElementById('versionHistoryModal').classList.add('hidden');
+  });
+  document.getElementById('restoreVersionBtn').addEventListener('click', async () => {
+    if (!selectedVersionId) return;
+    if (!confirm('Restore this version? It becomes the new current state (this is itself saved to history, so nothing is lost).')) return;
+    const res = await editFetch(`/api/orgs/${currentOrgId}/versions/${selectedVersionId}/restore`, { method: 'POST' });
+    if (res) {
+      document.getElementById('versionHistoryModal').classList.add('hidden');
+      await loadOrgData(currentOrgId);
+    }
   });
 
   // New Org modal
