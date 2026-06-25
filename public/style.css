@@ -288,7 +288,7 @@ input[type="checkbox"], input[type="range"] {
   overflow-y: auto;
   transform: translateX(100%);
   transition: transform 0.2s ease;
-  z-index: 50;
+  z-index: 70; /* above #brandLogo (60) - the open detail panel should sit on top of the logo, not under it */
 }
 
 #detailPanel.resizing {
@@ -302,7 +302,7 @@ input[type="checkbox"], input[type="range"] {
   width: 6px;
   height: 100%;
   cursor: ew-resize;
-  z-index: 51;
+  z-index: 71;
 }
 
 #detailResizeHandle:hover {

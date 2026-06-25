@@ -576,6 +576,24 @@ function updateVpBackdropsFromDom() {
   const topLeftMinRoom = labelHeight + 4;
   const minGapToManager = 2; // tighter than the bubble-to-bubble gap - here we just need to clear the card, not leave a generous margin
 
+  // The connector curves between a manager and its children fan out
+  // horizontally across most of the gap between them, not just right under
+  // the manager's card - clamping the label's top edge to the manager
+  // card's bottom alone left it sitting right in the middle of that fan,
+  // overlapping the lines. Measuring the actual rendered <path> elements
+  // and clamping below whichever one reaches lowest (within this group's
+  // own horizontal span) accounts for the real curve geometry instead of
+  // assuming it's a straight vertical line.
+  const linkPathRects = Array.from(document.querySelectorAll('#chart svg path')).map((p) => {
+    const r = p.getBoundingClientRect();
+    return {
+      left: r.left - containerRect.left,
+      right: r.right - containerRect.left,
+      top: r.top - containerRect.top,
+      bottom: r.bottom - containerRect.top,
+    };
+  });
+
   // Bubbles only ever overlap horizontally (peers sit side by side at the
   // same level) - cap each side's padding at half the gap to its nearest
   // neighbor, minus a hard minimum gap, so two bubbles can never touch.
@@ -590,10 +608,14 @@ function updateVpBackdropsFromDom() {
 
     // The top tries to reserve enough room for an in-bubble label by default
     // (more than the other sides need), but can't cross into this node's own
-    // manager's card above - whichever is more restrictive wins.
+    // manager's card above, nor any connector line feeding into this group
+    // from above - whichever is most restrictive wins.
     const managerCard = g.managerId != null ? cardsById.get(g.managerId) : null;
     const managerBottom = managerCard ? managerCard.rect.bottom - containerRect.top : -Infinity;
-    g.minY = Math.max(g.rawMinY - topLeftMinRoom, managerBottom + minGapToManager);
+    const feedingLinksBottom = linkPathRects
+      .filter((pr) => pr.right > g.rawMinX && pr.left < g.rawMaxX && pr.top < g.rawMinY)
+      .reduce((max, pr) => Math.max(max, pr.bottom), -Infinity);
+    g.minY = Math.max(g.rawMinY - topLeftMinRoom, managerBottom + minGapToManager, feedingLinksBottom + minGapToManager);
   });
 
   // The horizontal-neighbor padding above assumes peers sit in a single
@@ -1041,7 +1063,7 @@ function wireNotesSection(data) {
       body: JSON.stringify({ title, text }),
     });
     if (res) {
-      await loadOrgData(currentOrgId);
+      await loadOrgData(currentOrgId, { preserveView: true });
       const refreshed = flatData.find((d) => d.id === data.id);
       if (refreshed) showDetail(refreshed);
     }
@@ -1082,7 +1104,7 @@ function wireCustomFieldsSection(data) {
       body: JSON.stringify({ custom_fields_json: JSON.stringify(fields) }),
     });
     if (res) {
-      await loadOrgData(currentOrgId);
+      await loadOrgData(currentOrgId, { preserveView: true });
       const refreshed = flatData.find((d) => d.id === data.id);
       if (refreshed) showDetail(refreshed);
     } else {
@@ -1153,7 +1175,7 @@ function showDetail(data) {
       });
       if (res) {
         panel.classList.remove('open');
-        await loadOrgData(currentOrgId);
+        await loadOrgData(currentOrgId, { preserveView: true });
       }
     });
 
@@ -1170,7 +1192,7 @@ function showDetail(data) {
         });
         if (res) {
           panel.classList.remove('open');
-          await loadOrgData(currentOrgId);
+          await loadOrgData(currentOrgId, { preserveView: true });
         }
       });
     });
@@ -1189,7 +1211,7 @@ function showDetail(data) {
         });
         if (res) {
           panel.classList.remove('open');
-          await loadOrgData(currentOrgId);
+          await loadOrgData(currentOrgId, { preserveView: true });
         }
       });
     }
@@ -1233,7 +1255,7 @@ function showDetail(data) {
     });
     if (res) {
       panel.classList.remove('open');
-      await loadOrgData(currentOrgId);
+      await loadOrgData(currentOrgId, { preserveView: true });
     }
   });
 
@@ -1244,7 +1266,7 @@ function showDetail(data) {
     });
     if (res) {
       panel.classList.remove('open');
-      await loadOrgData(currentOrgId);
+      await loadOrgData(currentOrgId, { preserveView: true });
     }
   });
 
@@ -1337,7 +1359,15 @@ function focusOnPerson(name) {
 
 // ---------- Org loading ----------
 
-async function loadOrgData(orgId) {
+// Saving an edit, a note, a custom field, etc. always re-fetches the whole
+// org (simplest way to stay in sync), but the user is still looking at
+// whatever person/subtree they had isolated - snapping back to the full org
+// view on every save reads as the chart "jumping" out from under them.
+// preserveView restores the same isolated id (and its same ancestor-to-
+// descendants framing) after the reload, when that id still exists.
+async function loadOrgData(orgId, { preserveView = false } = {}) {
+  const isolatedIdToRestore = preserveView && currentOrgId === orgId ? currentIsolatedId : null;
+
   currentOrgId = orgId;
   currentIsolatedId = null;
   greyedSiblingIds = new Set();
@@ -1359,6 +1389,9 @@ async function loadOrgData(orgId) {
   buildClientOrgDrilldown();
 
   renderChart(flatData);
+  if (isolatedIdToRestore != null && flatDataById.has(isolatedIdToRestore)) {
+    isolatePerson(isolatedIdToRestore); // sets chart.data() only - applyDepthLimit() below does the one render+fit
+  }
   applyDepthLimit();
 
   const dataList = document.getElementById('employee-list');
