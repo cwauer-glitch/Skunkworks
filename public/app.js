@@ -529,6 +529,37 @@ function computeBubbleTargets(cards) {
   return Array.from(targets.entries()).map(([id, isFocal]) => ({ id, isFocal }));
 }
 
+// Groups a group's own cards into rows by tree depth from the group's
+// anchor node, not by pixel position - card heights vary now (wrapped
+// titles, custom fields), and d3-org-chart doesn't strictly top-align
+// same-depth siblings once their heights differ, so clustering by rendered
+// position misread which cards actually belong together and split single
+// cards across two row rectangles. Depth from the actual manager_id chain
+// is exact regardless of rendered height.
+function clusterIntoRows(rootId, groupCards, containerRect) {
+  const byDepth = new Map();
+  groupCards.forEach((c) => {
+    let depth = 0;
+    let cur = flatDataById.get(c.id);
+    while (cur && cur.id !== rootId && cur.manager_id != null) {
+      cur = flatDataById.get(cur.manager_id);
+      depth++;
+    }
+    if (!byDepth.has(depth)) byDepth.set(depth, []);
+    byDepth.get(depth).push(c);
+  });
+  const depths = Array.from(byDepth.keys()).sort((a, b) => a - b);
+  return depths.map((d) => {
+    const rowCards = byDepth.get(d);
+    return {
+      rawMinX: Math.min(...rowCards.map((c) => c.rect.left)) - containerRect.left,
+      rawMaxX: Math.max(...rowCards.map((c) => c.rect.right)) - containerRect.left,
+      rawMinY: Math.min(...rowCards.map((c) => c.rect.top)) - containerRect.top,
+      rawMaxY: Math.max(...rowCards.map((c) => c.rect.bottom)) - containerRect.top,
+    };
+  });
+}
+
 function updateVpBackdropsFromDom() {
   const layer = document.getElementById('vpBackdropLayer');
   if (!layer) return;
@@ -547,8 +578,16 @@ function updateVpBackdropsFromDom() {
   const desiredPadding = 16;
   const minGap = 10; // always leave at least this much space between two bubbles
 
-  // Raw (unpadded) bounding box per target's own card + all of its descendants,
-  // in #chart-local coordinates.
+  // A single rectangle per group used to incidentally swallow up unrelated
+  // cards: a group's own anchor card is often narrow, but its deeper
+  // descendant rows can spread much wider, and a simple min/max bounding
+  // box over EVERY row stretches the anchor's own (otherwise narrow,
+  // unrelated-card-free) row out to that same width too. Building one
+  // rectangle per depth row instead - "stepped", narrow rows on top,
+  // however wide they need to be further down - means a row only ever
+  // claims the screen space its own cards actually occupy, so it can never
+  // reach into a foreign card that merely happens to share a deeper row's
+  // column.
   const groups = bubbleTargets.map(({ id, isFocal }) => {
     const descendantIds = new Set();
     const collect = (pid) => {
@@ -564,15 +603,14 @@ function updateVpBackdropsFromDom() {
       isFocal,
       managerId: nodeData ? nodeData.manager_id : null,
       descendantIds,
-      rawMinX: Math.min(...groupCards.map((n) => n.rect.left)) - containerRect.left,
-      rawMaxX: Math.max(...groupCards.map((n) => n.rect.right)) - containerRect.left,
-      rawMinY: Math.min(...groupCards.map((n) => n.rect.top)) - containerRect.top,
-      rawMaxY: Math.max(...groupCards.map((n) => n.rect.bottom)) - containerRect.top,
+      rowBoxes: clusterIntoRows(id, groupCards, containerRect),
     };
   }).filter(Boolean);
 
-  // Sized for the larger top-left "block lettering" font, generously enough
-  // that the smaller peer-label tier fits comfortably in the same space too.
+  groups.forEach((g, i) => { g.color = VP_PASTELS[i % VP_PASTELS.length]; });
+
+  // Sized for the block-lettering label font, generously enough that it
+  // fits comfortably in the available space.
   const labelHeight = 20;
   const topLeftMinRoom = labelHeight + 4;
   const minGapToManager = 2; // tighter than the bubble-to-bubble gap - here we just need to clear the card, not leave a generous margin
@@ -582,8 +620,8 @@ function updateVpBackdropsFromDom() {
   // the manager's card - clamping the label's top edge to the manager
   // card's bottom alone left it sitting right in the middle of that fan,
   // overlapping the lines. Measuring the actual rendered <path> elements
-  // and clamping below whichever one reaches lowest (within this group's
-  // own horizontal span) accounts for the real curve geometry instead of
+  // and clamping below whichever one reaches lowest (within this row's own
+  // horizontal span) accounts for the real curve geometry instead of
   // assuming it's a straight vertical line.
   const linkPathRects = Array.from(document.querySelectorAll('#chart svg path')).map((p) => {
     const r = p.getBoundingClientRect();
@@ -595,52 +633,63 @@ function updateVpBackdropsFromDom() {
     };
   });
 
+  const allRows = [];
   groups.forEach((g) => {
-    g.padLeft = desiredPadding;
-    g.padRight = desiredPadding;
-    g.padBottom = desiredPadding;
-
-    // The top tries to reserve enough room for an in-bubble label by default
-    // (more than the other sides need), but can't cross into this node's own
-    // manager's card above, nor any connector line feeding into this group
-    // from above - whichever is most restrictive wins. Capped at rawMinY
-    // itself: a connector line terminates right at the card's own top edge,
-    // so its bottom (plus the gap buffer) can land at or just past rawMinY -
-    // without this cap that pushed the bubble's top BELOW the card it's
-    // supposed to enclose, leaving its own top sliver uncovered.
-    const managerCard = g.managerId != null ? cardsById.get(g.managerId) : null;
-    const managerBottom = managerCard ? managerCard.rect.bottom - containerRect.top : -Infinity;
-    const feedingLinksBottom = linkPathRects
-      .filter((pr) => pr.right > g.rawMinX && pr.left < g.rawMaxX && pr.top < g.rawMinY)
-      .reduce((max, pr) => Math.max(max, pr.bottom), -Infinity);
-    g.minY = Math.min(g.rawMinY, Math.max(g.rawMinY - topLeftMinRoom, managerBottom + minGapToManager, feedingLinksBottom + minGapToManager));
+    g.rowBoxes.forEach((rb, ri) => {
+      rb.group = g;
+      rb.padLeft = desiredPadding;
+      rb.padRight = desiredPadding;
+      if (ri === 0) {
+        // The top row tries to reserve enough room for the label by default,
+        // but can't cross into this node's own manager's card above, nor any
+        // connector line feeding into it from above - whichever is most
+        // restrictive wins. Capped at the row's own top: a connector line
+        // terminates right at the card's own top edge, so its bottom (plus
+        // the gap buffer) can land at or just past it - without this cap
+        // that pushed the row's top BELOW the card it's supposed to
+        // enclose, leaving its own top sliver uncovered.
+        const managerCard = g.managerId != null ? cardsById.get(g.managerId) : null;
+        const managerBottom = managerCard ? managerCard.rect.bottom - containerRect.top : -Infinity;
+        const feedingLinksBottom = linkPathRects
+          .filter((pr) => pr.right > rb.rawMinX && pr.left < rb.rawMaxX && pr.top < rb.rawMinY)
+          .reduce((max, pr) => Math.max(max, pr.bottom), -Infinity);
+        rb.minY = Math.min(rb.rawMinY, Math.max(rb.rawMinY - topLeftMinRoom, managerBottom + minGapToManager, feedingLinksBottom + minGapToManager));
+      } else {
+        // Interior rows of the same group share a seam with the row above -
+        // touching, not gapped, so the bubble reads as one continuous shape.
+        const prev = g.rowBoxes[ri - 1];
+        const boundary = (prev.rawMaxY + rb.rawMinY) / 2;
+        rb.minY = boundary;
+        prev.maxY = boundary;
+      }
+      if (ri === g.rowBoxes.length - 1) {
+        rb.padBottom = desiredPadding;
+        rb.maxY = rb.rawMaxY + rb.padBottom;
+      }
+      allRows.push(rb);
+    });
   });
 
-  // Any two groups can be tiled side by side (the common case) OR stacked
-  // in different rows (d3-org-chart wraps many leaf-only children into a
-  // multi-row grid to save width) - either way, if their raw (unpadded)
-  // card footprints have a real gap along some axis, they don't actually
-  // overlap, and shrinking padding on the two facing sides along THAT axis
-  // (just enough to leave minGap between the padded boxes) keeps both
-  // bubbles intact without overlapping - this applies even to a pair
-  // involving the focal group, since a real gap means there's room to
-  // negotiate rather than needing to accept an overlap.
+  // Any two rows (from DIFFERENT groups) can be side by side or stacked -
+  // either way, if their raw (unpadded) footprints have a real gap along
+  // some axis, shrinking padding on the two facing sides along THAT axis
+  // (just enough to leave minGap between them) keeps both intact without
+  // overlapping - this applies even across a focal/peer pair, since a real
+  // gap means there's room to negotiate rather than needing to accept an
+  // overlap. Rows belonging to the SAME group are deliberately skipped -
+  // they're meant to touch, not be pushed apart.
   // Only when the raw footprints have NO gap in either axis (one is
-  // genuinely, fully inside the other's bounding box - e.g. a peer VP's
-  // card incidentally falling within an isolated sibling's much wider
-  // subtree span) is there nothing padding can do: for a peer-vs-peer pair
-  // that's a real multi-row tiling conflict, so the later one is dropped
-  // rather than rendering a broken overlap; for a pair involving the focal
-  // group, dropping either bubble would lose information the user
-  // explicitly wants kept, so the (typically small) nesting is accepted -
-  // the peer's own opaque box simply draws on top of that part of the
-  // focal's.
+  // genuinely, fully inside the other's span) is there nothing padding can
+  // do: drop the later one rather than render a broken overlap, unless
+  // either side is focal - dropping a focal or its peer would lose
+  // information the user explicitly wants kept, so that (typically small)
+  // residual nesting is accepted instead.
   for (let pass = 0; pass < 3; pass++) {
-    for (let i = 0; i < groups.length; i++) {
-      for (let j = i + 1; j < groups.length; j++) {
-        const a = groups[i];
-        const b = groups[j];
-        if (!a || !b) continue;
+    for (let i = 0; i < allRows.length; i++) {
+      for (let j = i + 1; j < allRows.length; j++) {
+        const a = allRows[i];
+        const b = allRows[j];
+        if (!a || !b || a.group === b.group) continue;
         if (a.rawMaxX <= b.rawMinX || b.rawMaxX <= a.rawMinX) {
           const left = a.rawMaxX <= b.rawMinX ? a : b;
           const right = left === a ? b : a;
@@ -650,111 +699,108 @@ function updateVpBackdropsFromDom() {
         } else if (a.rawMaxY <= b.rawMinY || b.rawMaxY <= a.rawMinY) {
           const top = a.rawMaxY <= b.rawMinY ? a : b;
           const bottom = top === a ? b : a;
-          const avail = Math.max(0, (bottom.rawMinY - top.rawMaxY - minGap) / 2);
-          top.padBottom = Math.min(top.padBottom, avail);
-          bottom.minY = Math.max(bottom.minY, top.rawMaxY + top.padBottom + minGap);
-        } else if (!a.isFocal && !b.isFocal) {
-          groups[j] = null;
+          if (top.padBottom != null) {
+            const avail = Math.max(0, (bottom.rawMinY - top.rawMaxY - minGap) / 2);
+            top.padBottom = Math.min(top.padBottom, avail);
+            top.maxY = top.rawMaxY + top.padBottom;
+          }
+          if (bottom.minY != null) {
+            bottom.minY = Math.max(bottom.minY, top.maxY + minGap);
+          }
+        } else if (!a.group.isFocal && !b.group.isFocal) {
+          allRows[j] = null;
         }
       }
     }
   }
-  const survivingGroups = groups.filter(Boolean);
+  const survivingRows = allRows.filter(Boolean);
 
-  // The negotiation above only ever runs bubble-group against bubble-group -
-  // but plenty of cards on screen (greyed ancestor-chain context from a
-  // completely unrelated branch, e.g. another SVP's whole team) aren't part
-  // of any group at all, and a wide bubble's padding can still reach into
-  // one of those incidentally. Treat every such foreign card as a
-  // zero-padding obstacle and run the same gap-based shrink against it.
-  survivingGroups.forEach((g) => {
+  // The negotiation above only ever runs row against row - but plenty of
+  // cards on screen (greyed ancestor-chain context from a completely
+  // unrelated branch, e.g. another SVP's whole team) aren't part of any
+  // group at all, and a row's padding can still reach into one of those
+  // incidentally. Treat every such foreign card as a zero-padding obstacle
+  // and run the same gap-based shrink against it.
+  survivingRows.forEach((rb) => {
     cards.forEach((c) => {
-      if (g.descendantIds.has(c.id)) return;
+      if (rb.group.descendantIds.has(c.id)) return;
       const cardBox = {
         left: c.rect.left - containerRect.left,
         right: c.rect.right - containerRect.left,
         top: c.rect.top - containerRect.top,
         bottom: c.rect.bottom - containerRect.top,
       };
-      if (g.rawMaxX <= cardBox.left || cardBox.right <= g.rawMinX) {
-        if (g.rawMaxX <= cardBox.left) {
-          g.padRight = Math.min(g.padRight, Math.max(0, cardBox.left - g.rawMaxX - minGap));
+      if (rb.rawMaxX <= cardBox.left || cardBox.right <= rb.rawMinX) {
+        if (rb.rawMaxX <= cardBox.left) {
+          rb.padRight = Math.min(rb.padRight, Math.max(0, cardBox.left - rb.rawMaxX - minGap));
         } else {
-          g.padLeft = Math.min(g.padLeft, Math.max(0, g.rawMinX - cardBox.right - minGap));
+          rb.padLeft = Math.min(rb.padLeft, Math.max(0, rb.rawMinX - cardBox.right - minGap));
         }
-      } else if (g.rawMaxY <= cardBox.top || cardBox.bottom <= g.rawMinY) {
-        if (g.rawMaxY <= cardBox.top) {
-          g.padBottom = Math.min(g.padBottom, Math.max(0, cardBox.top - g.rawMaxY - minGap));
-        } else {
-          g.minY = Math.max(g.minY, cardBox.bottom + minGap);
+      } else if (rb.maxY <= cardBox.top || cardBox.bottom <= rb.minY) {
+        if (rb.maxY <= cardBox.top && rb.padBottom != null) {
+          rb.padBottom = Math.min(rb.padBottom, Math.max(0, cardBox.top - rb.rawMaxY - minGap));
+          rb.maxY = rb.rawMaxY + rb.padBottom;
+        } else if (cardBox.bottom <= rb.minY) {
+          rb.minY = Math.max(rb.minY, cardBox.bottom + minGap);
         }
       }
-      // else: the foreign card's footprint has no gap from this group's raw
-      // box in either axis. A single rectangle can't both fully enclose
-      // this group's own multi-row subtree AND exclude a card that happens
-      // to sit beside one of its shallower rows while still falling inside
-      // the box's overall span - that needs a notched (multi-rect) bubble
-      // shape to solve properly, which is a bigger change than padding can
-      // buy. Accepted as the same kind of nesting tolerated for focal
-      // groups, just rarer for peers - the foreign card's own opaque box
-      // still draws on top, so nothing visually disappears.
+      // else: genuinely no gap in either axis - same accepted-nesting
+      // exception as the row-vs-row case above.
     });
   });
 
   const belowSpecs = [];
+  const labelFontPx = 17;
+  const labelMinFontPx = 11;
 
-  survivingGroups.forEach((g, i) => {
-    const minX = g.rawMinX - g.padLeft;
-    const maxX = g.rawMaxX + g.padRight;
-    const minY = g.minY;
-    const maxY = g.rawMaxY + g.padBottom;
-    const color = VP_PASTELS[i % VP_PASTELS.length];
+  groups.forEach((g) => {
+    const rows = g.rowBoxes.filter((rb) => survivingRows.includes(rb));
+    if (!rows.length) return;
 
-    const backdrop = document.createElement('div');
-    backdrop.className = 'vp-backdrop';
-    backdrop.dataset.nodeId = g.nodeId;
-    backdrop.style.left = `${minX}px`;
-    backdrop.style.top = `${minY}px`;
-    backdrop.style.width = `${maxX - minX}px`;
-    backdrop.style.height = `${maxY - minY}px`;
-    backdrop.style.background = color;
-    layer.appendChild(backdrop);
+    rows.forEach((rb) => {
+      const minX = rb.rawMinX - rb.padLeft;
+      const maxX = rb.rawMaxX + rb.padRight;
+      const backdrop = document.createElement('div');
+      backdrop.className = 'vp-backdrop';
+      backdrop.dataset.nodeId = g.nodeId;
+      backdrop.style.left = `${minX}px`;
+      backdrop.style.top = `${rb.minY}px`;
+      backdrop.style.width = `${maxX - minX}px`;
+      backdrop.style.height = `${rb.maxY - rb.minY}px`;
+      backdrop.style.background = g.color;
+      layer.appendChild(backdrop);
+    });
 
     if (!showVpLabels) return;
     const node = flatDataById.get(g.nodeId);
     const text = node ? deriveFunctionLabel(node.title) : '';
-    const labelColor = darkenColor(color, 0.42);
-    const startFontPx = g.isFocal ? 17 : 11;
-    const minFontPx = g.isFocal ? 11 : 8;
+    const labelColor = darkenColor(g.color, 0.42);
 
-    // If there's enough vertical room above the topmost card to fit even a
-    // single line, it reads better pinned to the bubble's own top-left
-    // (block lettering, sized down for non-focal peers so they can't compete
-    // with or overlap the focal node's own connector line up to its
-    // manager), staying visible as you scroll - the strip between the
-    // bubble top and the topmost card is guaranteed card-free, so this can
-    // never overlap anything regardless of horizontal position. Width that
-    // doesn't fit falls back to ellipsis rather than rejecting the whole
-    // placement, so most labels still land top-left.
-    const availableRoom = g.rawMinY - minY;
+    // Labels read as one uniform visual language regardless of which card
+    // is currently isolated or how many peers are showing - sized purely by
+    // available room, never by focal/peer status.
+    const topRow = rows[0];
+    const minX = topRow.rawMinX - topRow.padLeft;
+    const maxX = topRow.rawMaxX + topRow.padRight;
+    const availableRoom = topRow.rawMinY - topRow.minY;
     let placedTopLeft = false;
     if (availableRoom >= topLeftMinRoom) {
       const label = document.createElement('div');
-      label.className = `vp-backdrop-label ${g.isFocal ? 'vp-backdrop-label-large' : ''}`;
+      label.className = 'vp-backdrop-label vp-backdrop-label-large';
       label.textContent = text;
       label.style.color = labelColor;
       label.style.maxWidth = `${Math.max(60, maxX - minX - 16)}px`;
-      let fontPx = startFontPx;
+      let fontPx = labelFontPx;
       label.style.fontSize = `${fontPx}px`;
       layer.appendChild(label);
-      while (label.getBoundingClientRect().height > availableRoom - 4 && fontPx > minFontPx) {
+      while (label.getBoundingClientRect().height > availableRoom - 4 && fontPx > labelMinFontPx) {
         fontPx -= 1;
         label.style.fontSize = `${fontPx}px`;
       }
       const labelRect = label.getBoundingClientRect();
       if (labelRect.height <= availableRoom - 4) {
         label.style.left = `${Math.min(Math.max(minX, 0) + 8, maxX - labelRect.width - 8)}px`;
-        label.style.top = `${Math.min(Math.max(minY, 0) + 6, g.rawMinY - labelRect.height - 4)}px`;
+        label.style.top = `${Math.min(Math.max(topRow.minY, 0) + 6, topRow.rawMinY - labelRect.height - 4)}px`;
         label.dataset.ownerId = g.nodeId;
         placedTopLeft = true;
       } else {
@@ -762,21 +808,24 @@ function updateVpBackdropsFromDom() {
       }
     }
     if (!placedTopLeft) {
-      belowSpecs.push({ centerX: (minX + maxX) / 2, bubbleBottom: maxY, color: labelColor, text, isFocal: g.isFocal, nodeId: g.nodeId });
+      const bottomRow = rows[rows.length - 1];
+      const bMinX = Math.min(...rows.map((r) => r.rawMinX - r.padLeft));
+      const bMaxX = Math.max(...rows.map((r) => r.rawMaxX + r.padRight));
+      belowSpecs.push({ centerX: (bMinX + bMaxX) / 2, bubbleBottom: bottomRow.maxY, color: labelColor, text, nodeId: g.nodeId });
     }
   });
 
   if (belowSpecs.length) renderVpLabels(layer, belowSpecs);
 
-  // The horizontal padding negotiation above only resolves conflicts
-  // between bubbles themselves - a "below" label can still land in the gap
-  // between two vertically-stacked bubbles that's wide enough for the
-  // bubbles not to touch but too narrow for a label to fit in between
-  // without reaching into the next bubble down. Rather than risk that
-  // (the label's own font-shrinking only guards against squeezing between
-  // same-row neighbors), do one final sweep: any label that overlaps a
-  // bubble it doesn't belong to gets removed outright - no label is better
-  // than one that violates the no-overlap rule.
+  // The padding negotiation above only resolves conflicts between rows
+  // themselves - a "below" label can still land in the gap between two
+  // vertically-stacked bubbles that's wide enough for the bubbles not to
+  // touch but too narrow for a label to fit in between without reaching
+  // into the next bubble down. Rather than risk that (the label's own
+  // font-shrinking only guards against squeezing between same-row
+  // neighbors), do one final sweep: any label that overlaps a bubble it
+  // doesn't belong to gets removed outright - no label is better than one
+  // that violates the no-overlap rule.
   const allBackdrops = Array.from(layer.querySelectorAll('.vp-backdrop'));
   Array.from(layer.querySelectorAll('.vp-backdrop-label')).forEach((label) => {
     const lr = label.getBoundingClientRect();
@@ -801,6 +850,8 @@ function updateVpBackdropsFromDom() {
 // the same principle the bubbles themselves use to avoid touching.
 function renderVpLabels(layer, specs) {
   const gap = 8;
+  const baseFontPx = 13;
+  const minFontPx = 10;
 
   specs.sort((a, b) => a.centerX - b.centerX);
 
@@ -809,7 +860,7 @@ function renderVpLabels(layer, specs) {
     label.className = 'vp-backdrop-label';
     label.textContent = spec.text;
     label.style.color = spec.color;
-    label.style.fontSize = `${spec.isFocal ? 13 : 10}px`;
+    label.style.fontSize = `${baseFontPx}px`;
     label.style.visibility = 'hidden';
     label.dataset.ownerId = spec.nodeId;
     layer.appendChild(label);
@@ -834,14 +885,9 @@ function renderVpLabels(layer, specs) {
     const rightAvail = rightIsSameRow ? (rightNeighbor.centerX - spec.centerX) / 2 - gap / 2 : Infinity;
     return Math.max(20, Math.min(leftAvail, rightAvail));
   });
-  const scales = specs.map((spec, i) => {
-    const baseFontPx = spec.isFocal ? 13 : 10;
-    const minFontPx = spec.isFocal ? 10 : 8;
-    return Math.max(minFontPx / baseFontPx, Math.min(1, avails[i] / (widths[i] / 2)));
-  });
+  const scales = specs.map((spec, i) => Math.max(minFontPx / baseFontPx, Math.min(1, avails[i] / (widths[i] / 2))));
 
   specs.forEach((spec, i) => {
-    const baseFontPx = spec.isFocal ? 13 : 10;
     const fontPx = Math.round(baseFontPx * scales[i]);
     const label = els[i];
     label.style.fontSize = `${fontPx}px`;
