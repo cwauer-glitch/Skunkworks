@@ -13,6 +13,7 @@ let selectedSellers = new Set();
 let currentIsolatedId = null;
 let depthSliderValue = 2;
 let greyedSiblingIds = new Set();
+let showVpLabels = true;
 
 const VP_PASTELS = ['#fde2e2', '#e2f0fd', '#e2fde6', '#fdf6e2', '#f0e2fd', '#e2fdfa', '#fde2f6', '#eaf5d8'];
 
@@ -162,7 +163,7 @@ function buildDrilldownLevel(managerId, container) {
   row.className = 'control-row drilldown-row';
   row.innerHTML = `
     <label>${reports[0].level || 'Reports'}</label>
-    <select><option value="">— choose —</option>${reports.map((r) => `<option value="${r.id}">${r.name}</option>`).join('')}</select>
+    <select><option value="">— choose —</option>${reports.map((r) => `<option value="${r.id}">${r.name}${r.title ? ` — ${r.title}` : ''}</option>`).join('')}</select>
   `;
   container.appendChild(row);
 
@@ -176,6 +177,7 @@ function buildDrilldownLevel(managerId, container) {
     if (!e.target.value) return;
     const id = Number(e.target.value);
     isolatePerson(id);
+    applyDepthLimit();
     buildDrilldownLevel(id, container);
   });
 }
@@ -188,7 +190,7 @@ function buildClientOrgDrilldown() {
 
   const rootRow = document.createElement('div');
   rootRow.className = 'control-row drilldown-row';
-  rootRow.innerHTML = `<label>${root.level || 'Top'}</label><select><option value="${root.id}">${root.name}</option></select>`;
+  rootRow.innerHTML = `<label>${root.level || 'Top'}</label><select><option value="${root.id}">${root.name}${root.title ? ` — ${root.title}` : ''}</option></select>`;
   container.appendChild(rootRow);
 
   buildDrilldownLevel(root.id, container);
@@ -252,6 +254,7 @@ function handleNodeClick(d) {
     clickTimer = setTimeout(() => {
       clickTimer = null;
       isolatePerson(d.data.id);
+      applyDepthLimit();
     }, 250);
   }
 }
@@ -336,6 +339,16 @@ function darkenColor(hex, amount) {
   return `rgb(${r}, ${g}, ${b})`;
 }
 
+// A VP's card title is e.g. "VP, IT Service Management" - the label shows
+// just the functional part ("IT Service Management"), matching how SVP
+// titles like "SVP, Cybersecurity & Risk" already read once the level
+// prefix is stripped.
+function deriveFunctionLabel(title) {
+  if (!title) return '';
+  const stripped = title.replace(/^(CTO|SVP|VP|Director|Manager|Staff)\s*,?\s*/i, '').trim();
+  return stripped || title;
+}
+
 function updateVpBackdropsFromDom() {
   const layer = document.getElementById('vpBackdropLayer');
   if (!layer) return;
@@ -345,6 +358,7 @@ function updateVpBackdropsFromDom() {
     id: Number(el.dataset.nodeId),
     rect: el.getBoundingClientRect(),
   }));
+  const cardsById = new Map(cards.map((c) => [c.id, c]));
 
   const visibleVps = cards.filter((n) => {
     const d = flatData.find((fd) => fd.id === n.id);
@@ -367,8 +381,10 @@ function updateVpBackdropsFromDom() {
     collect(vpNode.id);
     const groupCards = cards.filter((n) => descendantIds.has(n.id));
     if (!groupCards.length) return null;
+    const vpData = flatData.find((d) => d.id === vpNode.id);
     return {
       vpId: vpNode.id,
+      managerId: vpData ? vpData.manager_id : null,
       rawMinX: Math.min(...groupCards.map((n) => n.rect.left)) - containerRect.left,
       rawMaxX: Math.max(...groupCards.map((n) => n.rect.right)) - containerRect.left,
       rawMinY: Math.min(...groupCards.map((n) => n.rect.top)) - containerRect.top,
@@ -387,15 +403,20 @@ function updateVpBackdropsFromDom() {
     const rightAvail = right ? Math.max(0, (right.rawMinX - g.rawMaxX - minGap) / 2) : desiredPadding;
     g.padLeft = Math.min(desiredPadding, leftAvail);
     g.padRight = Math.min(desiredPadding, rightAvail);
+
+    // The top can't just take a fixed padding - it must stop short of the
+    // VP's own manager's card (the SVP above), wherever that card actually is.
+    const managerCard = g.managerId != null ? cardsById.get(g.managerId) : null;
+    const managerBottom = managerCard ? managerCard.rect.bottom - containerRect.top : -Infinity;
+    g.minY = Math.max(g.rawMinY - desiredPadding, managerBottom + minGap);
   });
 
-  const labelHeight = 16;
-  const labelAreaHeight = labelHeight + 12; // extra room above the VP's own card reserved just for the label
+  const labelSpecs = [];
 
   groups.forEach((g, i) => {
     const minX = g.rawMinX - g.padLeft;
     const maxX = g.rawMaxX + g.padRight;
-    const minY = g.rawMinY - desiredPadding - labelAreaHeight;
+    const minY = g.minY;
     const maxY = g.rawMaxY + desiredPadding;
     const color = VP_PASTELS[i % VP_PASTELS.length];
 
@@ -408,18 +429,76 @@ function updateVpBackdropsFromDom() {
     backdrop.style.background = color;
     layer.appendChild(backdrop);
 
-    // Pinned to the top-left of whichever part of the bubble is currently
-    // scrolled into view (clamped to #chart's own bounds, since that's the
-    // visible viewport), but never lower than the reserved label area above
-    // the VP's own card, so it can't dip down and overlap that card.
-    const vp = flatData.find((d) => d.id === g.vpId);
+    if (showVpLabels) {
+      const vp = flatData.find((d) => d.id === g.vpId);
+      labelSpecs.push({
+        centerX: (minX + maxX) / 2,
+        bubbleBottom: maxY,
+        color: darkenColor(color, 0.42),
+        text: vp ? deriveFunctionLabel(vp.title) : '',
+      });
+    }
+  });
+
+  if (showVpLabels && labelSpecs.length) renderVpLabels(layer, labelSpecs);
+}
+
+// Labels sit just below their own bubble with a short leader line up to it,
+// rather than inside the bubble (which competes with the SVP row above).
+// When zoomed out, adjacent labels are squeezed toward each other and would
+// start to overlap - shrinking their font-size (not just nudging position,
+// since position is tied to the bubble's own center) keeps a minimum gap,
+// the same principle the bubbles themselves use to avoid touching.
+function renderVpLabels(layer, specs) {
+  const gap = 8;
+  const minFontPx = 9;
+  const baseFontPx = 12;
+
+  specs.sort((a, b) => a.centerX - b.centerX);
+
+  const els = specs.map((spec) => {
     const label = document.createElement('div');
     label.className = 'vp-backdrop-label';
-    label.textContent = vp ? `${vp.name}'s Org` : '';
-    label.style.color = darkenColor(color, 0.42);
-    label.style.left = `${Math.min(Math.max(minX, 0) + 8, Math.max(maxX - 60, minX))}px`;
-    label.style.top = `${Math.min(Math.max(minY, 0) + 6, g.rawMinY - labelHeight - 4)}px`;
+    label.textContent = spec.text;
+    label.style.color = spec.color;
+    label.style.fontSize = `${baseFontPx}px`;
+    label.style.visibility = 'hidden';
     layer.appendChild(label);
+    return label;
+  });
+
+  // Measure at base size first, then compute how much each label needs to
+  // shrink to fit within the space available to its nearest neighbor.
+  const widths = els.map((el) => el.getBoundingClientRect().width);
+  const avails = specs.map((spec, i) => {
+    const leftNeighbor = specs[i - 1];
+    const rightNeighbor = specs[i + 1];
+    const leftAvail = leftNeighbor ? (spec.centerX - leftNeighbor.centerX) / 2 - gap / 2 : Infinity;
+    const rightAvail = rightNeighbor ? (rightNeighbor.centerX - spec.centerX) / 2 - gap / 2 : Infinity;
+    return Math.max(20, Math.min(leftAvail, rightAvail));
+  });
+  const scales = specs.map((spec, i) => Math.max(minFontPx / baseFontPx, Math.min(1, avails[i] / (widths[i] / 2))));
+
+  specs.forEach((spec, i) => {
+    const fontPx = Math.round(baseFontPx * scales[i]);
+    const label = els[i];
+    label.style.fontSize = `${fontPx}px`;
+    // Shrinking the font can only do so much - long text still won't always
+    // fit even at the minimum readable size, so this is the hard guarantee
+    // against overlap: truncate with an ellipsis rather than spill over.
+    label.style.maxWidth = `${avails[i] * 2}px`;
+    label.style.visibility = 'visible';
+    const width = Math.min(label.getBoundingClientRect().width, avails[i] * 2);
+    const labelTop = spec.bubbleBottom + 14;
+    label.style.left = `${spec.centerX - width / 2}px`;
+    label.style.top = `${labelTop}px`;
+
+    const line = document.createElement('div');
+    line.className = 'vp-backdrop-leader';
+    line.style.left = `${spec.centerX}px`;
+    line.style.top = `${spec.bubbleBottom}px`;
+    line.style.height = `${labelTop - spec.bubbleBottom}px`;
+    layer.appendChild(line);
   });
 }
 
@@ -429,7 +508,11 @@ function applyDepthLimit() {
   const viewRootId = currentIsolatedId != null ? currentIsolatedId : trueRootId();
   if (viewRootId == null) return;
 
-  chart.collapseAll();
+  // chart.collapseAll() renders internally, which combined with the single
+  // render().fit() below caused a visible two-stage "collapse, then
+  // re-expand" stutter on every selection. Clearing flags directly and
+  // rendering once avoids that.
+  chart.getChartState().allNodes.forEach((d) => { d.data._expanded = false; });
 
   // d3-org-chart's _expanded flag reveals the FLAGGED node itself, by
   // unwinding the collapse state of its ancestor chain up to the root - it
@@ -486,14 +569,13 @@ function isolatePerson(id) {
   }
 
   const filtered = flatData.filter((d) => keepIds.has(d.id));
-  chart.data(filtered).render();
-  applyDepthLimit();
+  chart.data(filtered); // caller renders (usually via applyDepthLimit) - not done here, so callers can set flags (e.g. highlight) first without a second render
 }
 
 function showFullOrg() {
   currentIsolatedId = null;
   greyedSiblingIds = new Set();
-  chart.data(originalOrder).render();
+  chart.data(originalOrder);
   applyDepthLimit();
 }
 
@@ -577,18 +659,18 @@ function managerOptions(selectEl, excludeId) {
 
 function personFormFields(prefix, data = {}) {
   return `
-    <label>Name <input id="${prefix}Name" type="text" value="${data.name || ''}" /></label>
-    <label>Title <input id="${prefix}Title" type="text" value="${data.title || ''}" /></label>
-    <label>Level
+    <div class="field-row"><label>Name</label><input id="${prefix}Name" type="text" value="${data.name || ''}" /></div>
+    <div class="field-row"><label>Title</label><input id="${prefix}Title" type="text" value="${data.title || ''}" /></div>
+    <div class="field-row"><label>Level</label>
       <select id="${prefix}Level">
         ${['CTO', 'SVP', 'VP', 'Director', 'Manager', 'Staff'].map((lvl) =>
           `<option value="${lvl}" ${data.level === lvl ? 'selected' : ''}>${lvl}</option>`).join('')}
       </select>
-    </label>
-    <label>Division <input id="${prefix}Division" type="text" value="${data.division || ''}" /></label>
-    <label>Location <input id="${prefix}Location" type="text" value="${data.location || ''}" /></label>
-    <label>Apex Seller <input id="${prefix}Seller" type="text" value="${data.seller || ''}" /></label>
-    <label>Seller Territory <input id="${prefix}SellerTerritory" type="text" value="${data.seller_territory || ''}" /></label>
+    </div>
+    <div class="field-row"><label>Division</label><input id="${prefix}Division" type="text" value="${data.division || ''}" /></div>
+    <div class="field-row"><label>Location</label><input id="${prefix}Location" type="text" value="${data.location || ''}" /></div>
+    <div class="field-row"><label>Apex Seller</label><input id="${prefix}Seller" type="text" value="${data.seller || ''}" /></div>
+    <div class="field-row"><label>Seller Territory</label><input id="${prefix}SellerTerritory" type="text" value="${data.seller_territory || ''}" /></div>
     <label>Priority Tags <input id="${prefix}PriorityTags" type="text" value="${data.priority_tags || ''}" /></label>
     <label>Priority Goal <textarea id="${prefix}PriorityGoal">${data.priority_goal || ''}</textarea></label>
     <label>Priority Signal
@@ -789,7 +871,7 @@ function showDetail(data) {
   content.innerHTML = `
     <h2>${data.name}</h2>
     ${personFormFields('ed', data)}
-    <label>Reports To <select id="edManager"></select></label>
+    <div class="field-row"><label>Reports To</label><select id="edManager"></select></div>
     <p id="editError" class="modal-error"></p>
     <div class="modal-actions">
       <button id="saveDetailBtn">Save changes</button>
@@ -900,8 +982,8 @@ function isolateByPriority(values) {
   });
 
   const filtered = flatData.filter((d) => keepIds.has(d.id));
-  chart.data(filtered).render();
-  chart.expandAll().fit();
+  filtered.forEach((d) => { d._expanded = true; }); // set before the one render, not via a second expandAll() render
+  chart.data(filtered).render().fit();
   scheduleRectRefresh();
 }
 
@@ -910,8 +992,9 @@ function isolateByPriority(values) {
 function focusOnPerson(name) {
   const id = nameToId.get(name);
   if (!id) return;
-  isolatePerson(id);
-  chart.setUpToTheRootHighlighted(id).setCentered(id).render().fit();
+  isolatePerson(id); // sets chart.data() to include id - must happen before setCentered/etc below, which only look at the current data
+  chart.setUpToTheRootHighlighted(id).setCentered(id);
+  applyDepthLimit(); // the one render+fit, with the flags above already set
   scheduleRectRefresh();
 }
 
@@ -1078,6 +1161,11 @@ async function init() {
   document.getElementById('priorityFilter').addEventListener('change', (e) => {
     showOnlyFlagged = e.target.checked;
     chart.render();
+  });
+
+  document.getElementById('vpLabelsToggle').addEventListener('change', (e) => {
+    showVpLabels = e.target.checked;
+    updateVpBackdropsFromDom();
   });
 
   document.getElementById('allAmsBtn').addEventListener('click', () => {

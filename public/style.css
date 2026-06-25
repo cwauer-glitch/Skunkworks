@@ -209,9 +209,16 @@ body {
 
 .vp-backdrop-label {
   position: absolute;
-  font-size: 12px;
   font-weight: 700;
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.vp-backdrop-leader {
+  position: absolute;
+  width: 2px;
+  background: #1a3a6b;
 }
 
 #detailPanel {
@@ -306,6 +313,32 @@ body {
   font-weight: 600;
   margin-top: 12px;
   margin-bottom: 4px;
+}
+
+.field-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+#detailContent .field-row label,
+.modal .field-row label {
+  display: block;
+  flex: 0 0 110px;
+  margin: 0;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+#detailContent .field-row input,
+#detailContent .field-row select,
+.modal .field-row input,
+.modal .field-row select {
+  flex: 1;
+  width: auto;
+  margin: 0;
 }
 
 #detailContent input,

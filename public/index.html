@@ -66,6 +66,11 @@
       </div>
 
       <div class="control-row">
+        <label for="vpLabelsToggle">Show org labels:</label>
+        <input type="checkbox" id="vpLabelsToggle" checked />
+      </div>
+
+      <div class="control-row">
         <label></label>
         <button id="addPersonBtn">+ Add Person</button>
       </div>
@@ -108,9 +113,9 @@
     <div class="modal">
       <h3>Add Person</h3>
       <p id="addPersonError" class="modal-error"></p>
-      <label>Name <input id="apName" type="text" /></label>
-      <label>Title <input id="apTitle" type="text" /></label>
-      <label>Level
+      <div class="field-row"><label>Name</label><input id="apName" type="text" /></div>
+      <div class="field-row"><label>Title</label><input id="apTitle" type="text" /></div>
+      <div class="field-row"><label>Level</label>
         <select id="apLevel">
           <option value="CTO">CTO</option>
           <option value="SVP">SVP</option>
@@ -119,12 +124,12 @@
           <option value="Manager">Manager</option>
           <option value="Staff" selected>Staff</option>
         </select>
-      </label>
-      <label>Division <input id="apDivision" type="text" /></label>
-      <label>Location <input id="apLocation" type="text" /></label>
-      <label>Apex Seller <input id="apSeller" type="text" /></label>
-      <label>Seller Territory <input id="apSellerTerritory" type="text" /></label>
-      <label>Reports To <select id="apManager"></select></label>
+      </div>
+      <div class="field-row"><label>Division</label><input id="apDivision" type="text" /></div>
+      <div class="field-row"><label>Location</label><input id="apLocation" type="text" /></div>
+      <div class="field-row"><label>Apex Seller</label><input id="apSeller" type="text" /></div>
+      <div class="field-row"><label>Seller Territory</label><input id="apSellerTerritory" type="text" /></div>
+      <div class="field-row"><label>Reports To</label><select id="apManager"></select></div>
       <label>Priority Tags <input id="apPriorityTags" type="text" /></label>
       <label>Priority Goal <textarea id="apPriorityGoal"></textarea></label>
       <label>Priority Signal
