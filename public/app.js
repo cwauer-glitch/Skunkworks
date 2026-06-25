@@ -12,6 +12,9 @@ let showOnlyFlagged = false;
 let selectedSellers = new Set();
 let currentIsolatedId = null;
 let depthSliderValue = 2;
+let greyedSiblingIds = new Set();
+
+const VP_PASTELS = ['#fde2e2', '#e2f0fd', '#e2fde6', '#fdf6e2', '#f0e2fd', '#e2fdfa', '#fde2f6', '#eaf5d8'];
 
 function colorForSeller(seller) {
   if (!seller) return '#9aa0a6';
@@ -143,7 +146,7 @@ function nodeContent(d) {
 
   if (data.status === 'vacant') {
     return `
-      <div class="org-card" style="width:220px; border:3px solid #d33; border-radius:8px; background:#fdeaea; padding:8px 10px; font-family:inherit;">
+      <div class="org-card" data-node-id="${data.id}" style="width:220px; border:3px solid #d33; border-radius:8px; background:#fdeaea; padding:8px 10px; font-family:inherit;">
         <div class="node-card-title" style="color:#a00;">VACANT</div>
         <div class="node-card-sub">previously: ${data.departed_name || 'Unknown'}</div>
         <div class="node-card-sub">${data.location || ''}</div>
@@ -161,6 +164,10 @@ function nodeContent(d) {
   if (showOnlyFlagged && data.priority_signal !== 'high') {
     opacity = Math.min(opacity, 0.25);
   }
+  if (greyedSiblingIds.has(data.id)) {
+    filterCss = 'grayscale(0.8)';
+    opacity = Math.min(opacity, 0.4);
+  }
 
   const badge = data.priority_signal === 'high'
     ? '<span class="priority-badge priority-high" title="High priority signal">★</span>'
@@ -169,7 +176,7 @@ function nodeContent(d) {
       : '';
 
   return `
-    <div class="org-card" style="position:relative; width:220px; border:2px solid ${color}; border-radius:8px; background:#fff; padding:8px 10px; font-family:inherit; opacity:${opacity}; filter:${filterCss};">
+    <div class="org-card" data-node-id="${data.id}" style="position:relative; width:220px; border:2px solid ${color}; border-radius:8px; background:#fff; padding:8px 10px; font-family:inherit; opacity:${opacity}; filter:${filterCss};">
       ${badge}
       <div class="node-card-title">${data.name}</div>
       <div class="node-card-sub">${data.title || ''}</div>
@@ -194,8 +201,23 @@ function handleNodeClick(d) {
   }
 }
 
+// Smooth flowing S-curve between parent and child, replacing d3-org-chart's
+// default rounded-elbow connector. Signature matches what layoutBindings.top
+// .diagonal is called with (source point, target point, mid point, offsets).
+function smoothDiagonal(s, t, _m, offsets = {}) {
+  const sy = s.y + (offsets.sy || 0);
+  const midY = (sy + t.y) / 2;
+  return `M ${s.x} ${sy} C ${s.x} ${midY}, ${t.x} ${midY}, ${t.x} ${t.y}`;
+}
+
 function renderChart(data) {
-  document.getElementById('chart').innerHTML = '';
+  const container = document.getElementById('chart');
+  container.innerHTML = '';
+
+  const backdropLayer = document.createElement('div');
+  backdropLayer.id = 'vpBackdropLayer';
+  container.appendChild(backdropLayer);
+
   chart = new d3.OrgChart()
     .container('#chart')
     .data(data)
@@ -210,26 +232,63 @@ function renderChart(data) {
     .nodeContent(nodeContent)
     .onNodeClick(handleNodeClick)
     .onZoom(() => scheduleRectRefresh())
-    .render();
+    .linkUpdate(function (d) {
+      d3.select(this)
+        .attr('stroke', d.data._upToTheRootHighlighted ? '#E27396' : '#1a3a6b')
+        .attr('stroke-width', d.data._upToTheRootHighlighted ? 4 : 2)
+        .attr('fill', 'none');
+      if (d.data._upToTheRootHighlighted) d3.select(this).raise();
+    });
+
+  // layoutBindings.top.diagonal generates the actual link path string - override
+  // it with a smooth curve before the first render.
+  const layout = chart.layoutBindings();
+  layout.top.diagonal = smoothDiagonal;
+  chart.layoutBindings(layout).render();
+
+  // The SVG d3-org-chart creates needs an explicit stacking context so our
+  // absolutely-positioned backdrop layer (inserted before it in the DOM)
+  // reliably paints behind it rather than on top.
+  const svg = container.querySelector('svg');
+  if (svg) {
+    svg.style.position = 'relative';
+    svg.style.zIndex = '1';
+  }
+
   scheduleRectRefresh();
 }
 
 // ---------- Hover-magnify effect ----------
+//
+// The card under the cursor should read as large as it would in an isolated
+// few-card view, regardless of how zoomed-out the full org currently is - so
+// the boost amount is derived from the chart's current zoom scale (1/k - 1
+// roughly cancels out the zoom-out), not a fixed constant. Falloff away from
+// the cursor follows a Gaussian bell curve (not linear) so it reads as a
+// smooth lens rather than a hard-edged circle.
 
 let nodeRects = [];
 let scaledEls = new Set();
-let maxBoost = 0.3;
 let mouseMoveRafPending = false;
+const MAGNIFY_RADIUS = 260;
+const MAGNIFY_SIGMA = MAGNIFY_RADIUS / 2.2;
+const MAX_BOOST_CAP = 9; // generous ceiling for extreme zoom-out (avoids runaway scale)
+
+function currentZoomScale() {
+  try {
+    return chart.getChartState().lastTransform.k || 1;
+  } catch (e) {
+    return 1;
+  }
+}
 
 function refreshNodeRects() {
   const cards = document.querySelectorAll('#chart .org-card');
   nodeRects = Array.from(cards).map((el) => {
     const rect = el.getBoundingClientRect();
-    return { el, cx: rect.left + rect.width / 2, cy: rect.top + rect.height / 2 };
+    return { el, id: Number(el.dataset.nodeId), cx: rect.left + rect.width / 2, cy: rect.top + rect.height / 2, rect };
   });
-  const count = nodeRects.length || 1;
-  const normalized = Math.min(count / 300, 1);
-  maxBoost = 0.15 + normalized * (1.2 - 0.15);
+  updateVpBackdrops();
 }
 
 function scheduleRectRefresh() {
@@ -243,15 +302,16 @@ function handleChartMouseMove(e) {
   mouseMoveRafPending = true;
   requestAnimationFrame(() => {
     mouseMoveRafPending = false;
-    const radius = 160;
+    const k = currentZoomScale();
+    const boost = Math.max(0, Math.min(1 / k - 1, MAX_BOOST_CAP));
     const stillScaled = new Set();
     for (const node of nodeRects) {
       const dx = e.clientX - node.cx;
       const dy = e.clientY - node.cy;
       const dist = Math.sqrt(dx * dx + dy * dy);
-      if (dist < radius) {
-        const t = dist / radius;
-        const scale = 1 + maxBoost * (1 - t);
+      if (dist < MAGNIFY_RADIUS) {
+        const bell = Math.exp(-(dist * dist) / (2 * MAGNIFY_SIGMA * MAGNIFY_SIGMA));
+        const scale = 1 + boost * bell;
         node.el.style.transform = `scale(${scale})`;
         node.el.style.zIndex = '10';
         stillScaled.add(node.el);
@@ -264,6 +324,49 @@ function handleChartMouseMove(e) {
       }
     }
     scaledEls = stillScaled;
+  });
+}
+
+// ---------- VP group backdrops ----------
+
+function updateVpBackdrops() {
+  const layer = document.getElementById('vpBackdropLayer');
+  if (!layer) return;
+  layer.innerHTML = '';
+
+  const visibleVps = nodeRects.filter((n) => {
+    const d = flatData.find((fd) => fd.id === n.id);
+    return d && d.level === 'VP';
+  });
+  if (visibleVps.length < 2) return;
+
+  const containerRect = document.getElementById('chart').getBoundingClientRect();
+  const padding = 16;
+
+  visibleVps.forEach((vpNode, i) => {
+    const descendantIds = new Set();
+    const collect = (pid) => {
+      descendantIds.add(pid);
+      flatData.filter((d) => d.manager_id === pid).forEach((c) => collect(c.id));
+    };
+    collect(vpNode.id);
+
+    const groupRects = nodeRects.filter((n) => descendantIds.has(n.id));
+    if (!groupRects.length) return;
+
+    const minX = Math.min(...groupRects.map((n) => n.rect.left)) - containerRect.left - padding;
+    const maxX = Math.max(...groupRects.map((n) => n.rect.right)) - containerRect.left + padding;
+    const minY = Math.min(...groupRects.map((n) => n.rect.top)) - containerRect.top - padding;
+    const maxY = Math.max(...groupRects.map((n) => n.rect.bottom)) - containerRect.top + padding;
+
+    const backdrop = document.createElement('div');
+    backdrop.className = 'vp-backdrop';
+    backdrop.style.left = `${minX}px`;
+    backdrop.style.top = `${minY}px`;
+    backdrop.style.width = `${maxX - minX}px`;
+    backdrop.style.height = `${maxY - minY}px`;
+    backdrop.style.background = VP_PASTELS[i % VP_PASTELS.length];
+    layer.appendChild(backdrop);
   });
 }
 
@@ -281,6 +384,7 @@ function applyDepthLimit() {
   // root, flag every node at depth 1..N relative to it (not its ancestors).
   if (currentIsolatedId != null) {
     chart.setExpanded(currentIsolatedId, true); // unwinds the full path up to the true root
+    greyedSiblingIds.forEach((sid) => chart.setExpanded(sid, true)); // greyed siblings: visible, not expanded
   }
 
   let frontier = [viewRootId];
@@ -303,18 +407,30 @@ function applyDepthLimit() {
 
 function isolatePerson(id) {
   currentIsolatedId = id;
+  const clicked = flatData.find((d) => d.id === id);
+
   const ancestorIds = new Set();
-  let cur = flatData.find((d) => d.id === id);
+  let cur = clicked;
   while (cur) {
     ancestorIds.add(cur.id);
     cur = cur.manager_id != null ? flatData.find((d) => d.id === cur.manager_id) : null;
   }
+
   const keepIds = new Set(ancestorIds);
   const collectDescendants = (pid) => {
     keepIds.add(pid);
     flatData.filter((d) => d.manager_id === pid).forEach((c) => collectDescendants(c.id));
   };
   collectDescendants(id);
+
+  // Siblings (other people reporting to the same manager) stay visible but
+  // greyed-out rather than hidden, until clicked themselves.
+  greyedSiblingIds = new Set();
+  if (clicked && clicked.manager_id != null) {
+    flatData
+      .filter((d) => d.manager_id === clicked.manager_id && d.id !== id)
+      .forEach((s) => { greyedSiblingIds.add(s.id); keepIds.add(s.id); });
+  }
 
   const filtered = flatData.filter((d) => keepIds.has(d.id));
   chart.data(filtered).render();
@@ -323,6 +439,7 @@ function isolatePerson(id) {
 
 function showFullOrg() {
   currentIsolatedId = null;
+  greyedSiblingIds = new Set();
   chart.data(originalOrder).render();
   applyDepthLimit();
 }
@@ -567,6 +684,7 @@ function focusOnPerson(name) {
 async function loadOrgData(orgId) {
   currentOrgId = orgId;
   currentIsolatedId = null;
+  greyedSiblingIds = new Set();
   const [treeRes, metaRes] = await Promise.all([
     fetch(`/api/orgs/${orgId}/tree`),
     fetch(`/api/orgs/${orgId}/meta`),
@@ -658,6 +776,13 @@ async function init() {
 
   document.getElementById('chart').addEventListener('mousemove', handleChartMouseMove);
   window.addEventListener('resize', () => scheduleRectRefresh());
+
+  document.getElementById('sidebarToggle').addEventListener('click', () => {
+    const sidebar = document.getElementById('sidebar');
+    const collapsed = sidebar.classList.toggle('collapsed');
+    document.getElementById('sidebarToggle').innerHTML = collapsed ? '&raquo;' : '&laquo;';
+    scheduleRectRefresh();
+  });
 
   document.getElementById('orgSwitcher').addEventListener('change', async (e) => {
     const orgId = Number(e.target.value);
